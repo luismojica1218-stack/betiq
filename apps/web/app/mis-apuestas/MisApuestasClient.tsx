@@ -1,0 +1,498 @@
+'use client'
+
+import { useState, useEffect } from 'react'
+import {
+  Ticket, ChevronLeft, ChevronRight, CheckCircle, XCircle,
+  Download, Trophy, Globe, Dumbbell, AlertCircle,
+  TrendingUp, TrendingDown, Clock, Loader2
+} from 'lucide-react'
+import { cn, formatCOP, formatPercent } from '@/lib/utils'
+import { createClient } from '@/lib/supabase/client'
+
+type BetStatus = 'pending' | 'won' | 'lost' | 'void'
+type SportFilter = 'all' | 'nba' | 'football' | 'tennis'
+
+interface Bet {
+  id:           string
+  match:        string
+  sport:        'nba' | 'football' | 'tennis'
+  market:       string
+  selection:    string
+  odd_at_bet:   number
+  amount_cop:   number
+  potential_win: number
+  status:       BetStatus
+  profit_loss:  number
+  bet_week:     string
+  date:         string
+  bookmaker:    string
+}
+
+// ---- Demo data — replaced by live Supabase data once bets are added -----
+const DEMO_BETS: Bet[] = [
+  { id: 'b1', match: 'Celtics vs Knicks',        sport: 'nba',      market: 'Moneyline',  selection: 'Boston Celtics', odd_at_bet: 1.65, amount_cop: 45000, potential_win: 74250,  status: 'won',     profit_loss:  29250, bet_week: '2026-04-07', date: '2026-04-08', bookmaker: 'rushbet' },
+  { id: 'b2', match: 'Real Madrid vs Barça',     sport: 'football', market: 'Over 2.5',   selection: 'Over',           odd_at_bet: 1.80, amount_cop: 25000, potential_win: 45000,  status: 'won',     profit_loss:  20000, bet_week: '2026-04-07', date: '2026-04-09', bookmaker: 'betplay' },
+  { id: 'b3', match: 'Lakers vs Warriors',       sport: 'nba',      market: 'Moneyline',  selection: 'LA Lakers',      odd_at_bet: 1.90, amount_cop: 30000, potential_win: 57000,  status: 'lost',    profit_loss: -30000, bet_week: '2026-04-07', date: '2026-04-09', bookmaker: 'rushbet' },
+  { id: 'b4', match: 'Djokovic vs Alcaraz',      sport: 'tennis',   market: 'Ganador',    selection: 'Djokovic',       odd_at_bet: 1.65, amount_cop: 20000, potential_win: 33000,  status: 'pending', profit_loss:       0, bet_week: '2026-04-07', date: '2026-04-11', bookmaker: 'rushbet' },
+  { id: 'b5', match: 'Nuggets vs Thunder',       sport: 'nba',      market: 'Moneyline',  selection: 'Denver Nuggets', odd_at_bet: 1.55, amount_cop: 28000, potential_win: 43400,  status: 'pending', profit_loss:       0, bet_week: '2026-04-14', date: '2026-04-15', bookmaker: 'rushbet' },
+  { id: 'b6', match: 'Man City vs Arsenal',      sport: 'football', market: 'BTTS Si',    selection: 'Ambos marcan',   odd_at_bet: 1.70, amount_cop: 20000, potential_win: 34000,  status: 'won',     profit_loss:  14000, bet_week: '2026-04-07', date: '2026-04-07', bookmaker: 'betplay' },
+  { id: 'b7', match: 'Heat vs 76ers',            sport: 'nba',      market: 'Moneyline',  selection: '76ers',          odd_at_bet: 1.78, amount_cop: 20000, potential_win: 35600,  status: 'lost',    profit_loss: -20000, bet_week: '2026-04-07', date: '2026-04-08', bookmaker: 'betplay' },
+]
+
+const LOSS_REASONS = [
+  { id: 'variance',              label: '📊 Varianza normal (el modelo era correcto)' },
+  { id: 'model_overconfidence',  label: '🤖 Sobreconfianza del modelo' },
+  { id: 'odds_value_poor',       label: '💸 Cuota sin valor real' },
+  { id: 'recent_form_ignored',   label: '📉 Forma reciente ignorada' },
+  { id: 'injury_key_player',     label: '🏥 Lesión jugador clave' },
+]
+
+export default function MisApuestasClient() {
+  const [sportFilter,  setSportFilter]  = useState<SportFilter>('all')
+  const [currentWeek,  setCurrentWeek]  = useState('2026-04-07')
+  const [bets,         setBets]         = useState<Bet[]>(DEMO_BETS)
+  const [updating,     setUpdating]     = useState<string | null>(null)
+
+  // Loss modal state
+  const [lossModal,    setLossModal]    = useState<{ betId: string; match: string } | null>(null)
+  const [lossReason,   setLossReason]   = useState('variance')
+  const [lossNotes,    setLossNotes]    = useState('')
+  const [lossLoading,  setLossLoading]  = useState(false)
+  const [patterns,     setPatterns]     = useState<any[]>([])
+
+  useEffect(() => {
+    async function loadPatterns() {
+      try {
+        const sup = createClient()
+        const { data: { user } } = await sup.auth.getUser()
+        const uid = user?.id || 'demo' 
+        const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+        const res = await fetch(`${API_URL}/api/analyze/patterns/${uid}`)
+        if (res.ok) {
+          const data = await res.json()
+          setPatterns(data.patterns || [])
+        }
+      } catch (err) {
+        // fail silently
+      }
+    }
+    loadPatterns()
+  }, [])
+
+  // Weeks navigation
+  const weekStart = new Date(currentWeek)
+  const weekEnd   = new Date(weekStart)
+  weekEnd.setDate(weekEnd.getDate() + 6)
+
+  function prevWeek() {
+    const d = new Date(currentWeek)
+    d.setDate(d.getDate() - 7)
+    setCurrentWeek(d.toISOString().split('T')[0])
+  }
+  function nextWeek() {
+    const d = new Date(currentWeek)
+    d.setDate(d.getDate() + 7)
+    setCurrentWeek(d.toISOString().split('T')[0])
+  }
+
+  const weekBets = bets.filter(b => b.bet_week === currentWeek)
+  const totalApostado = weekBets.reduce((sum, b) => sum + b.amount_cop, 0)
+  const totalGanado   = weekBets.filter(b => b.status === 'won').reduce((sum, b) => sum + b.potential_win, 0)
+  const profitLoss    = weekBets.reduce((sum, b) => sum + b.profit_loss, 0)
+  const wonCount      = weekBets.filter(b => b.status === 'won').length
+  const lostCount     = weekBets.filter(b => b.status === 'lost').length
+  const finishedCount = wonCount + lostCount
+  const roi           = totalApostado > 0 ? (profitLoss / totalApostado) * 100 : 0
+  const successPct    = finishedCount > 0 ? (wonCount / finishedCount) * 100 : 0
+
+  const pendingBets = weekBets.filter(b => b.status === 'pending')
+
+  const allBets = bets.filter(b => sportFilter === 'all' || b.sport === sportFilter)
+
+  async function markResult(betId: string, result: 'won' | 'lost') {
+    if (result === 'lost') {
+      const bet = bets.find(b => b.id === betId)
+      setLossModal({ betId, match: bet?.match || '' })
+      return
+    }
+    setUpdating(betId)
+    try {
+      const supabase = createClient()
+      await supabase.from('bets').update({
+        status: 'won',
+        result_confirmed_at: new Date().toISOString(),
+      }).eq('id', betId)
+    } catch { /* local update fallback */ }
+
+    setBets(prev => prev.map(b =>
+      b.id !== betId ? b :
+      { ...b, status: 'won', profit_loss: b.potential_win - b.amount_cop }
+    ))
+    setUpdating(null)
+  }
+
+  async function confirmLoss() {
+    if (!lossModal) return
+    setLossLoading(true)
+    try {
+      const supabase = createClient()
+      const { data: { user } } = await supabase.auth.getUser()
+
+      // Notify backend if real user
+      if (user) {
+        const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+        await fetch(`${API_URL}/api/analyze/loss`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ bet_id: lossModal.betId })
+        }).catch(() => {})
+      } else {
+        // Fallback manual local update
+        await supabase.from('bets').update({
+          status: 'lost',
+          loss_reason: lossReason,
+          result_confirmed_at: new Date().toISOString(),
+          profit_loss_cop: -(bets.find(b => b.id === lossModal.betId)?.amount_cop || 0),
+        }).eq('id', lossModal.betId)
+      }
+    } catch { /* local fallback */ }
+
+    setBets(prev => prev.map(b =>
+      b.id !== lossModal.betId ? b :
+      { ...b, status: 'lost', profit_loss: -b.amount_cop }
+    ))
+    setLossModal(null)
+    setLossNotes('')
+    setLossLoading(false)
+  }
+
+  function exportCSV() {
+    const headers = ['Fecha', 'Partido', 'Deporte', 'Mercado', 'Cuota', 'Monto', 'Resultado', 'P&L']
+    const rows = allBets.map(b => [
+      b.date, b.match, b.sport, b.market,
+      b.odd_at_bet.toFixed(2), b.amount_cop, b.status,
+      b.profit_loss
+    ])
+    const csv = [headers, ...rows].map(r => r.join(',')).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    a.href = url; a.download = `betiq_apuestas_${new Date().toISOString().split('T')[0]}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const sportIcon = (s: string) =>
+    s === 'nba' ? <Trophy className="w-3.5 h-3.5 text-nba-blue" /> :
+    s === 'football' ? <Globe className="w-3.5 h-3.5 text-football-green" /> :
+    <Dumbbell className="w-3.5 h-3.5 text-tennis-orange" />
+
+  return (
+    <div className="space-y-8">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-bold text-text flex items-center gap-3">
+            <Ticket className="w-6 h-6 text-accent" />
+            Mis Apuestas
+          </h2>
+          <p className="text-text-muted text-sm mt-1">Historial, seguimiento y análisis de rendimiento</p>
+        </div>
+      </div>
+
+      {/* Weekly Summary */}
+      <div className="card">
+        {/* Week selector */}
+        <div className="flex items-center justify-between mb-5">
+          <button onClick={prevWeek} className="btn-ghost p-2">
+            <ChevronLeft className="w-4 h-4" />
+          </button>
+          <div className="text-center">
+            <div className="text-sm font-bold text-text">
+              Semana del {weekStart.toLocaleDateString('es-CO', { day: 'numeric', month: 'short' })}
+              {' '}al {weekEnd.toLocaleDateString('es-CO', { day: 'numeric', month: 'short', year: 'numeric' })}
+            </div>
+            <div className="text-xs text-text-muted">{weekBets.length} apuestas registradas</div>
+          </div>
+          <button onClick={nextWeek} className="btn-ghost p-2">
+            <ChevronRight className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* KPIs */}
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+          {[
+            { label: 'Presupuesto', value: formatCOP(200000), cls: 'text-text' },
+            { label: 'Apostado',    value: formatCOP(totalApostado), cls: 'text-text', sub: `${((totalApostado/200000)*100).toFixed(0)}% usado` },
+            { label: 'Ganado',      value: formatCOP(totalGanado),   cls: 'text-success' },
+            { label: 'Utilidad',    value: formatCOP(profitLoss),    cls: profitLoss >= 0 ? 'text-success' : 'text-danger' },
+            { label: 'ROI',         value: formatPercent(roi),       cls: roi >= 0 ? 'text-success' : 'text-danger' },
+            { label: 'Tasa Éxito',  value: `${successPct.toFixed(0)}%`, cls: 'text-text', sub: `${wonCount}/${finishedCount}` },
+          ].map(kpi => (
+            <div key={kpi.label} className="bg-surface-2/50 rounded-xl p-3 text-center">
+              <div className={cn('text-xl font-bold', kpi.cls)}>{kpi.value}</div>
+              <div className="text-xs text-text-muted mt-1">{kpi.label}</div>
+              {kpi.sub && <div className="text-xs text-text-muted/60">{kpi.sub}</div>}
+            </div>
+          ))}
+        </div>
+
+        {/* P&L bar */}
+        {totalApostado > 0 && (
+          <div className="mt-4">
+            <div className="h-2 bg-surface-2 rounded-full overflow-hidden flex">
+              <div
+                className="h-full bg-success transition-all duration-700"
+                style={{ width: `${Math.min((totalGanado / totalApostado) * 100, 100)}%` }}
+              />
+            </div>
+            <div className="flex justify-between text-xs text-text-muted mt-1">
+              <span>Apostado: {formatCOP(totalApostado)}</span>
+              <span className={profitLoss >= 0 ? 'text-success' : 'text-danger'}>
+                {profitLoss >= 0 ? '▲' : '▼'} {formatCOP(Math.abs(profitLoss))} neto
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Active / Pending Bets */}
+      {pendingBets.length > 0 && (
+        <div>
+          <h3 className="section-title mb-4">Apuestas Activas ({pendingBets.length})</h3>
+          <div className="space-y-3">
+            {pendingBets.map(bet => (
+              <div key={bet.id} className="card border-warning/20">
+                <div className="flex items-start gap-4">
+                  <div className="p-2.5 bg-warning/10 rounded-xl flex-shrink-0">
+                    <Clock className="w-5 h-5 text-warning" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {sportIcon(bet.sport)}
+                      <span className="font-bold text-text text-sm">{bet.match}</span>
+                      <span className="badge badge-warning">Pendiente</span>
+                    </div>
+                    <div className="text-xs text-text-muted mt-1">
+                      {bet.market} · {bet.selection} · Cuota {bet.odd_at_bet.toFixed(2)} · {bet.bookmaker}
+                    </div>
+                    <div className="flex items-center gap-4 mt-2 text-sm">
+                      <span className="text-text-muted">Apostado: <span className="text-text font-semibold">{formatCOP(bet.amount_cop)}</span></span>
+                      <span className="text-text-muted">Potencial: <span className="text-success font-semibold">{formatCOP(bet.potential_win)}</span></span>
+                    </div>
+                  </div>
+                  <div className="flex gap-2 flex-shrink-0">
+                    <button
+                      id={`won-${bet.id}`}
+                      onClick={() => markResult(bet.id, 'won')}
+                      disabled={updating === bet.id}
+                      className="btn-success text-xs py-2 px-3"
+                    >
+                      {updating === bet.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <><CheckCircle className="w-3.5 h-3.5" /> GANÉ</>}
+                    </button>
+                    <button
+                      id={`lost-${bet.id}`}
+                      onClick={() => markResult(bet.id, 'lost')}
+                      disabled={updating === bet.id}
+                      className="btn-danger text-xs py-2 px-3"
+                    >
+                      <XCircle className="w-3.5 h-3.5" /> PERDÍ
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* History */}
+      <div>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="section-title">Historial de Apuestas</h3>
+          <div className="flex items-center gap-3">
+            {/* Sport filter tabs */}
+            <div className="flex items-center gap-1 bg-surface-2 rounded-lg p-1">
+              {(['all', 'nba', 'football', 'tennis'] as SportFilter[]).map(s => (
+                <button
+                  key={s}
+                  onClick={() => setSportFilter(s)}
+                  className={cn(
+                    'px-2.5 py-1 rounded-md text-xs font-semibold transition-all capitalize',
+                    sportFilter === s ? 'bg-accent text-white' : 'text-text-muted hover:text-text'
+                  )}
+                >
+                  {s === 'all' ? 'Todo' : s === 'nba' ? 'NBA' : s === 'football' ? 'Fútbol' : 'Tenis'}
+                </button>
+              ))}
+            </div>
+            <button onClick={exportCSV} className="btn-secondary text-xs py-2">
+              <Download className="w-3.5 h-3.5" />
+              Exportar CSV
+            </button>
+          </div>
+        </div>
+
+        <div className="card overflow-hidden p-0">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-surface-2 bg-surface-2/30">
+                  {['Fecha', 'Partido', 'Mercado', 'Cuota', 'Monto', 'Resultado', 'P&L'].map(h => (
+                    <th key={h} className="text-left px-4 py-3 text-xs text-text-muted font-semibold uppercase tracking-wider">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-surface-2/30">
+                {allBets.map(bet => (
+                  <tr key={bet.id} className="hover:bg-surface-2/20 transition-colors">
+                    <td className="px-4 py-3 text-xs text-text-muted whitespace-nowrap">{bet.date}</td>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-2">
+                        {sportIcon(bet.sport)}
+                        <span className="text-text font-medium text-xs">{bet.match}</span>
+                      </div>
+                      <div className="text-xs text-text-muted ml-5">{bet.selection}</div>
+                    </td>
+                    <td className="px-4 py-3 text-xs text-text-muted">{bet.market}</td>
+                    <td className="px-4 py-3 text-sm font-semibold text-text">{bet.odd_at_bet.toFixed(2)}</td>
+                    <td className="px-4 py-3 text-sm text-text">{formatCOP(bet.amount_cop)}</td>
+                    <td className="px-4 py-3">
+                      <span className={cn(
+                        'badge',
+                        bet.status === 'won'     ? 'badge-success' :
+                        bet.status === 'lost'    ? 'badge-danger'  :
+                        bet.status === 'pending' ? 'badge-warning' :
+                        'badge-blue'
+                      )}>
+                        {bet.status === 'won' ? '✓ Ganó' : bet.status === 'lost' ? '✗ Perdió' : bet.status === 'pending' ? '⏳ Pendiente' : 'Void'}
+                      </span>
+                    </td>
+                    <td className={cn(
+                      'px-4 py-3 text-sm font-bold',
+                      bet.profit_loss > 0 ? 'text-success' :
+                      bet.profit_loss < 0 ? 'text-danger'  : 'text-text-muted'
+                    )}>
+                      {bet.status === 'pending' ? '—' : (
+                        <span className="flex items-center gap-1">
+                          {bet.profit_loss > 0 ? <TrendingUp className="w-3.5 h-3.5" /> : bet.profit_loss < 0 ? <TrendingDown className="w-3.5 h-3.5" /> : null}
+                          {bet.profit_loss >= 0 ? '+' : ''}{formatCOP(bet.profit_loss)}
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+                {/* Totals row */}
+                <tr className="bg-surface-2/40 font-bold">
+                  <td colSpan={4} className="px-4 py-3 text-xs text-text-muted uppercase">Totales</td>
+                  <td className="px-4 py-3 text-sm text-text">{formatCOP(allBets.reduce((s, b) => s + b.amount_cop, 0))}</td>
+                  <td className="px-4 py-3 text-xs text-text-muted">{allBets.filter(b => b.status === 'won').length} ganadas</td>
+                  <td className={cn(
+                    'px-4 py-3 text-sm',
+                    allBets.reduce((s, b) => s + b.profit_loss, 0) >= 0 ? 'text-success' : 'text-danger'
+                  )}>
+                    {allBets.reduce((s, b) => s + b.profit_loss, 0) >= 0 ? '+' : ''}
+                    {formatCOP(allBets.reduce((s, b) => s + b.profit_loss, 0))}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      
+      {/* Loss Patterns */}
+      <div className="mt-8">
+        <h3 className="section-title mb-4 flex items-center gap-2">
+          <AlertCircle className="w-5 h-5 text-accent" />
+          Patrones de Pérdida
+        </h3>
+        {patterns.length === 0 ? (
+           <div className="card p-6 text-center text-text-muted italic bg-surface-2/30">
+             Necesitas reportar apuestas perdidas para que el agente de BetIQ analice fallos en tu algoritmo.
+           </div>
+        ) : (
+           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+             {patterns.map((p, i) => (
+                <div key={i} className={cn("p-4 rounded-xl border relative overflow-hidden", 
+                  p.type === 'info' ? 'bg-blue-500/10 border-blue-500/20' : 
+                  p.type === 'warning' ? 'bg-warning/10 border-warning/20' : 
+                  p.type === 'danger' ? 'bg-danger/10 border-danger/20' : 
+                  'bg-success/10 border-success/20'
+                )}>
+                  <h4 className={cn("text-sm font-bold mb-1", 
+                    p.type === 'info' ? 'text-blue-400' : 
+                    p.type === 'warning' ? 'text-warning' : 
+                    p.type === 'danger' ? 'text-danger' : 
+                    'text-success'
+                  )}>{p.title}</h4>
+                  <p className="text-xs text-text-muted leading-relaxed">{p.description}</p>
+                </div>
+             ))}
+           </div>
+        )}
+      </div>
+
+      {/* Loss modal */}
+      {lossModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setLossModal(null)} />
+          <div className="relative w-full max-w-md bg-surface border border-surface-2 rounded-2xl shadow-2xl animate-slide-up">
+            <div className="px-6 py-4 border-b border-surface-2">
+              <h3 className="text-lg font-bold text-text">Analizar Pérdida</h3>
+              <p className="text-xs text-text-muted mt-0.5">{lossModal.match}</p>
+            </div>
+            <div className="px-6 py-5 space-y-4">
+              <div className="flex items-start gap-2 p-3 bg-danger/10 border border-danger/20 rounded-lg">
+                <AlertCircle className="w-4 h-4 text-danger flex-shrink-0 mt-0.5" />
+                <div className="text-xs text-text-muted">
+                  BetIQ analizará el motivo de la pérdida para mejorar las predicciones futuras
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs text-text-muted font-medium mb-2 uppercase tracking-wider">
+                  Razón de la pérdida
+                </label>
+                {LOSS_REASONS.map(r => (
+                  <button
+                    key={r.id}
+                    onClick={() => setLossReason(r.id)}
+                    className={cn(
+                      'w-full text-left px-3 py-2.5 rounded-lg text-sm mb-1.5 border transition-all',
+                      lossReason === r.id
+                        ? 'bg-danger/10 border-danger/30 text-text'
+                        : 'border-surface-2 text-text-muted hover:border-danger/20'
+                    )}
+                  >
+                    {r.label}
+                  </button>
+                ))}
+              </div>
+              <div>
+                <label className="block text-xs text-text-muted font-medium mb-1.5 uppercase tracking-wider">
+                  Notas adicionales (opcional)
+                </label>
+                <textarea
+                  value={lossNotes}
+                  onChange={e => setLossNotes(e.target.value)}
+                  placeholder="¿Qué pasó? ¿Algo que el modelo no consideró?"
+                  className="input text-sm h-20 resize-none"
+                />
+              </div>
+            </div>
+            <div className="px-6 py-4 border-t border-surface-2 flex gap-3">
+              <button onClick={() => setLossModal(null)} className="btn-secondary flex-1 justify-center">
+                Cancelar
+              </button>
+              <button onClick={confirmLoss} disabled={lossLoading} className="btn-danger flex-1 justify-center border-0">
+                {lossLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <><XCircle className="w-4 h-4" /> Confirmar pérdida</>}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
