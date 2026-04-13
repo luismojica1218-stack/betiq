@@ -10,5 +10,8 @@
     "dev:web": "npm run dev --workspace=apps/web",
     "dev:api": "cd apps/api && uvicorn main:app --reload",
     "dev": "npm run dev:web & npm run dev:api"
+  },
+  "dependencies": {
+    "next": "^14.2.35"
   }
 }
