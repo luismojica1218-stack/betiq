@@ -32,7 +32,7 @@ export default function DashboardClient() {
         // Allow public mock if not logged in
         let q = sup.from('bets').select('*')
         if (user) q = q.eq('user_id', user.id)
-        const { data } = await q.execute()
+        const { data } = await q
         setBets(data || [])
       } finally {
         setLoading(false)
