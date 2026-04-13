@@ -11,10 +11,11 @@ WORKDIR /app
 # Install python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
+RUN pip install playwright
 # Install Playwright browsers (chromium only since we installed it system-wide)
 RUN playwright install chromium
-RUN pip install playwright
+
+
 
 # Copy application code
 COPY . .
