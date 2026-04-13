@@ -1,7 +1,7 @@
 'use client'
 
-import { useState } from 'react'
-import { Dumbbell, Clock, Filter, PlusCircle, Trophy, Activity, Target } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { Dumbbell, Clock, Filter, PlusCircle, Trophy, Activity, Target, Loader2 } from 'lucide-react'
 import { cn, formatCOP } from '@/lib/utils'
 import ConfirmBetModal, { type BetCandidate } from '@/components/ui/ConfirmBetModal'
 
@@ -128,8 +128,63 @@ export default function TenisClient() {
   const [minEV,         setMinEV]         = useState(0)
   const [activeBet,     setActiveBet]     = useState<BetCandidate | null>(null)
   const [confirmed,     setConfirmed]     = useState<Set<string>>(new Set())
+  const [liveMatches,   setLiveMatches]   = useState<typeof DEMO_MATCHES>(DEMO_MATCHES)
+  const [isLoading,     setIsLoading]     = useState(true)
 
-  const filtered = DEMO_MATCHES.filter(m => {
+  useEffect(() => {
+    async function fetchMatches() {
+      try {
+        const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+        const res = await fetch(`${API_URL}/api/tennis/matches`)
+        if (res.ok) {
+          const data = await res.json()
+          if (data.matches && data.matches.length > 0) {
+             const mapped = data.matches.map((m: any) => {
+                const pred = m.prediction || {}
+                const p1Odd = m.odds?.find((o: any) => (o.selection || '').toLowerCase().includes('home'))?.odd_value || 1.85
+                const p2Odd = m.odds?.find((o: any) => (o.selection || '').toLowerCase().includes('away'))?.odd_value || 1.95
+                
+                return {
+                  id: m.id,
+                  tour: m.league || 'ATP',
+                  tournament: m.round || 'Tournament',
+                  surface: 'hard', // Fallback
+                  round: m.round || 'Round',
+                  date: new Date(m.match_date).toLocaleString('es-CO', {day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'}),
+                  player1: m.home_team?.name || 'Player 1',
+                  player2: m.away_team?.name || 'Player 2',
+                  odds: { p1: p1Odd, p2: p2Odd },
+                  hnOdds: { p1: 1.85, p2: 1.85 },
+                  ouOdds: { over: 1.90, under: 1.90 },
+                  fsOdds: { p1: 1.85, p2: 1.85 },
+                  pred: {
+                    p1WinProb: pred.confidence || 0.5,
+                    p2WinProb: 1 - (pred.confidence || 0.5),
+                    pHandicapP1: 0.5, pHandicapP2: 0.5,
+                    pOverGames: 0.5, pUnderGames: 0.5, expTotalGames: 22.5, ouLine: 22.5,
+                    pFirstSetP1: 0.5, pFirstSetP2: 0.5,
+                    eloP1: 2000, eloP2: 2000,
+                    bestMarket: pred.recommended_market || 'p1_win',
+                    bestOdd: Math.max(p1Odd, p2Odd),
+                    ev: pred.expected_value || 0,
+                    betType: pred.bet_type || 'fixed',
+                    amount: pred.suggested_amount_cop || 0,
+                  }
+                }
+             })
+             setLiveMatches(mapped)
+          }
+        }
+      } catch (err) {
+        console.error("No real stats. Falling back to mocks.")
+      } finally {
+        setIsLoading(false)
+      }
+    }
+    fetchMatches()
+  }, [])
+
+  const filtered = liveMatches.filter(m => {
     if (activeTour !== 'all' && m.tour !== activeTour) return false
     if (activeSurface !== 'all' && m.surface !== activeSurface) return false
     if (m.pred.ev * 100 < minEV) return false
@@ -245,7 +300,12 @@ export default function TenisClient() {
 
       {/* Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {filtered.length === 0 ? (
+        {isLoading ? (
+          <div className="col-span-full text-center py-12 text-text-muted">
+            <Loader2 className="w-8 h-8 animate-spin mx-auto mb-3" />
+            <p>Conectando con Supabase y Scrapers...</p>
+          </div>
+        ) : filtered.length === 0 ? (
           <div className="col-span-full text-center py-12 text-text-muted">
             <Dumbbell className="w-12 h-12 mx-auto mb-3 opacity-20" />
             <p>No hay partidos disponibles con los filtros actuales</p>

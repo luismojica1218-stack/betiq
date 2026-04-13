@@ -1,7 +1,7 @@
 'use client'
 
-import { useState } from 'react'
-import { Trophy, RefreshCw, Clock, Filter, ChevronDown, PlusCircle, TrendingUp, AlertTriangle } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { Trophy, RefreshCw, Clock, Filter, ChevronDown, PlusCircle, TrendingUp, AlertTriangle, Loader2 } from 'lucide-react'
 import { cn, formatCOP, getEVLabel } from '@/lib/utils'
 import ConfirmBetModal, { type BetCandidate } from '@/components/ui/ConfirmBetModal'
 
@@ -55,9 +55,53 @@ export default function NBAPage() {
   const [minEV,      setMinEV]      = useState(0)
   const [activeBet,  setActiveBet]  = useState<BetCandidate | null>(null)
   const [confirmedIds, setConfirmedIds] = useState<Set<string>>(new Set())
-  const lastScraped = '3 min'
+  const [liveMatches, setLiveMatches] = useState<typeof DEMO_MATCHES>(DEMO_MATCHES)
+  const [isLoading, setIsLoading] = useState(true)
 
-  const filtered = DEMO_MATCHES.filter(m => {
+  useEffect(() => {
+    async function fetchMatches() {
+      try {
+        const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+        const res = await fetch(`${API_URL}/api/nba/matches`)
+        if (res.ok) {
+          const data = await res.json()
+          if (data.matches && data.matches.length > 0) {
+             // Map backend format to UI format
+             const mapped = data.matches.map((m: any) => {
+                const pred = m.prediction || {}
+                const homeOdd = m.odds?.find((o: any) => (o.selection || '').toLowerCase().includes('home'))?.odd_value || 1.90
+                const awayOdd = m.odds?.find((o: any) => (o.selection || '').toLowerCase().includes('away'))?.odd_value || 1.90
+                
+                return {
+                  id: m.id,
+                  homeTeam: m.home_team?.name || 'Local',
+                  awayTeam: m.away_team?.name || 'Visitante',
+                  date: new Date(m.match_date).toLocaleString('es-CO', {day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'}),
+                  status: m.status,
+                  odds: { home: homeOdd, away: awayOdd },
+                  prediction: {
+                    winner: pred.predicted_outcome === 'home' || (m.home_team?.name && pred.predicted_outcome === m.home_team.name) ? 'home' : 'away',
+                    prob: pred.confidence || 0.5,
+                    ev: pred.expected_value || 0,
+                    betType: pred.bet_type || 'fixed',
+                    amount: pred.suggested_amount_cop || 0,
+                    confidence: pred.confidence || 0.5
+                  }
+                }
+             })
+             setLiveMatches(mapped)
+          }
+        }
+      } catch (err) {
+        console.error("No real stats. Falling back to mocks.")
+      } finally {
+        setIsLoading(false)
+      }
+    }
+    fetchMatches()
+  }, [])
+
+  const filtered = liveMatches.filter(m => {
     if (filterDate === 'today' && !m.date.startsWith('Hoy')) return false
     if (filterDate === 'tomorrow' && !m.date.startsWith('Mañana')) return false
     if (filterType === 'fixed'  && m.prediction.betType !== 'fixed')  return false
@@ -161,7 +205,12 @@ export default function NBAPage() {
 
       {/* Match grid */}
       <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
-        {filtered.length === 0 ? (
+        {isLoading ? (
+          <div className="col-span-full text-center py-12 text-text-muted">
+            <Loader2 className="w-8 h-8 animate-spin mx-auto mb-3" />
+            <p>Conectando con Supabase y Scrapers...</p>
+          </div>
+        ) : filtered.length === 0 ? (
           <div className="col-span-full text-center py-12 text-text-muted">
             <Trophy className="w-12 h-12 mx-auto mb-3 opacity-20" />
             <p>No hay partidos con los filtros actuales</p>

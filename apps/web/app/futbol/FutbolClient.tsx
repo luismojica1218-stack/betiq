@@ -1,7 +1,7 @@
 'use client'
 
-import { useState } from 'react'
-import { Globe, Clock, Filter, PlusCircle, Flame, TrendingUp } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { Globe, Clock, Filter, PlusCircle, Flame, TrendingUp, Loader2 } from 'lucide-react'
 import { cn, formatCOP } from '@/lib/utils'
 import ConfirmBetModal, { type BetCandidate } from '@/components/ui/ConfirmBetModal'
 
@@ -143,8 +143,60 @@ export default function FutbolClient() {
   const [minEV,        setMinEV]        = useState(0)
   const [activeBet,    setActiveBet]    = useState<BetCandidate | null>(null)
   const [confirmed,    setConfirmed]    = useState<Set<string>>(new Set())
+  const [liveMatches,  setLiveMatches]  = useState<typeof DEMO_MATCHES>(DEMO_MATCHES)
+  const [isLoading,    setIsLoading]    = useState(true)
 
-  const filtered = DEMO_MATCHES.filter(m => {
+  useEffect(() => {
+    async function fetchMatches() {
+      try {
+        const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+        const res = await fetch(`${API_URL}/api/football/matches`)
+        if (res.ok) {
+          const data = await res.json()
+          if (data.matches && data.matches.length > 0) {
+             const mapped = data.matches.map((m: any) => {
+                const pred = m.prediction || {}
+                const homeOdd = m.odds?.find((o: any) => (o.selection || '').toLowerCase().includes('home'))?.odd_value || 2.10
+                const awayOdd = m.odds?.find((o: any) => (o.selection || '').toLowerCase().includes('away'))?.odd_value || 3.30
+                const drawOdd = m.odds?.find((o: any) => (o.selection || '').toLowerCase().includes('draw'))?.odd_value || 3.10
+                
+                return {
+                  id: m.id,
+                  league: m.league?.toLowerCase().replace(/\s+/g, '-') || 'all',
+                  homeTeam: m.home_team?.name || 'Local',
+                  awayTeam: m.away_team?.name || 'Visitante',
+                  date: new Date(m.match_date).toLocaleString('es-CO', {day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'}),
+                  odds: { home: homeOdd, draw: drawOdd, away: awayOdd },
+                  ouOdds: { over: 1.90, under: 1.90 },
+                  bttsOdds: { yes: 1.85, no: 1.85 },
+                  pred: {
+                    pHome: pred.confidence || 0.45,
+                    pDraw: 0.25,
+                    pAway: 0.30,
+                    pOver: 0.50,
+                    pBtts: 0.50,
+                    expGoals: 2.5,
+                    bestMarket: pred.recommended_market || 'home_win',
+                    bestOdd: homeOdd,
+                    ev: pred.expected_value || 0,
+                    betType: pred.bet_type || 'fixed',
+                    amount: pred.suggested_amount_cop || 0,
+                  }
+                }
+             })
+             setLiveMatches(mapped)
+          }
+        }
+      } catch (err) {
+        console.error("No real stats. Falling back to mocks.")
+      } finally {
+        setIsLoading(false)
+      }
+    }
+    fetchMatches()
+  }, [])
+
+  const filtered = liveMatches.filter(m => {
     if (activeLeague !== 'all' && m.league !== activeLeague) return false
     if (m.pred.ev * 100 < minEV) return false
     return true
@@ -245,7 +297,12 @@ export default function FutbolClient() {
 
       {/* Match cards */}
       <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
-        {filtered.length === 0 ? (
+        {isLoading ? (
+          <div className="col-span-full text-center py-12 text-text-muted">
+            <Loader2 className="w-8 h-8 animate-spin mx-auto mb-3" />
+            <p>Conectando con Supabase y Scrapers...</p>
+          </div>
+        ) : filtered.length === 0 ? (
           <div className="col-span-full text-center py-12 text-text-muted">
             <Globe className="w-12 h-12 mx-auto mb-3 opacity-20" />
             <p>No hay partidos disponibles con los filtros actuales</p>
