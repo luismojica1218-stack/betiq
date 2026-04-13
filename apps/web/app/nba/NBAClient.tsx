@@ -61,7 +61,7 @@ export default function NBAPage() {
   useEffect(() => {
     async function fetchMatches() {
       try {
-        const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+        const API_URL = process.env.NEXT_PUBLIC_API_URL || ''
         const res = await fetch(`${API_URL}/api/nba/matches`)
         if (res.ok) {
           const data = await res.json()
@@ -150,7 +150,7 @@ export default function NBAPage() {
         </div>
         <div className="flex items-center gap-2 text-xs text-text-muted bg-surface-2 px-3 py-2 rounded-lg">
           <Clock className="w-3.5 h-3.5" />
-          Último scraping: hace {lastScraped}
+          Actualizado recientemente
         </div>
       </div>
 
