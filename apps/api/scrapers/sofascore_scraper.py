@@ -318,115 +318,165 @@ async def _get_current_season_id(client: httpx.AsyncClient, tournament_id: int) 
     return seasons[0].get("id")
 
 
+# ── ESPN league key mapping ───────────────────────────────────────────────────
+ESPN_FOOTBALL_KEYS = {
+    "premier-league":   "eng.1",
+    "la-liga":          "esp.1",
+    "bundesliga":       "ger.1",
+    "serie-a":          "ita.1",
+    "ligue-1":          "fra.1",
+    "champions-league": "uefa.champions",
+    "libertadores":     "conmebol.libertadores",
+}
+
+ESPN_BASE_SITE = "https://site.api.espn.com/apis/site/v2/sports"
+ESPN_V2_BASE   = "https://site.api.espn.com/apis/v2/sports"
+
+
+async def _espn_fetch(url: str) -> Optional[dict]:
+    """Fetch JSON from ESPN API (no auth, public)."""
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                url,
+                headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"},
+                timeout=20.0,
+                follow_redirects=True,
+            )
+            if r.is_success:
+                return r.json()
+    except Exception as e:
+        logger.warning(f"ESPN fetch failed {url}: {e}")
+    return None
+
+
 async def get_football_team_stats(
     league_key: str,
     log_queue: Optional[asyncio.Queue] = None,
 ) -> dict[str, dict]:
     """
-    Fetch team season stats from SofaScore standings.
+    Fetch team season stats from ESPN standings API.
+    ESPN is reliable from Railway (same source used for fixtures).
     Returns dict keyed by team name with model-ready stats.
-    Replaces fbref (blocked on Railway).
     """
     async def log(msg: str):
         logger.info(msg)
         if log_queue:
             await log_queue.put({"type": "log", "message": msg})
 
-    tournament_id = FOOTBALL_TOURNAMENTS.get(league_key)
-    if not tournament_id:
-        await log(f"⚠️ Liga '{league_key}' sin ID en SofaScore")
+    espn_key = ESPN_FOOTBALL_KEYS.get(league_key)
+    if not espn_key:
+        await log(f"⚠️ Liga '{league_key}' sin clave ESPN para stats")
         return {}
 
-    await log(f"📊 SofaScore: cargando stats de {league_key}...")
+    await log(f"📊 ESPN: cargando standings/stats de {league_key}...")
     stats: dict[str, dict] = {}
 
-    async with httpx.AsyncClient() as client:
-        season_id = await _get_current_season_id(client, tournament_id)
-        if not season_id:
-            await log(f"⚠️ No se pudo obtener season ID para {league_key}")
-            return {}
+    # ── Try ESPN standings (v2) ───────────────────────────────────────────────
+    standings_url = f"{ESPN_V2_BASE}/soccer/{espn_key}/standings"
+    data = await _espn_fetch(standings_url)
 
-        # Fetch standings
-        url = f"{SOFA_BASE}/unique-tournament/{tournament_id}/season/{season_id}/standings/total"
-        data = await _fetch_json(client, url)
-        if not data:
-            await log(f"⚠️ SofaScore standings vacío para {league_key}")
-            return {}
+    if data:
+        # ESPN standings response: children[].standings.entries[]
+        children = data.get("children", []) or [data]
+        for child in children:
+            entries = child.get("standings", {}).get("entries", [])
+            for entry in entries:
+                team_name = entry.get("team", {}).get("displayName", "") or entry.get("team", {}).get("name", "")
+                if not team_name:
+                    continue
+                stats_list = entry.get("stats", [])
+                stat_map: dict[str, float] = {}
+                for s in stats_list:
+                    name_key = s.get("name") or s.get("abbreviation") or ""
+                    val      = s.get("value")
+                    if name_key and val is not None:
+                        try:
+                            stat_map[name_key] = float(val)
+                        except (TypeError, ValueError):
+                            pass
 
-        rows = []
-        for standings_group in data.get("standings", []):
-            rows.extend(standings_group.get("rows", []))
+                played    = stat_map.get("gamesPlayed", stat_map.get("GP", 1)) or 1
+                wins      = stat_map.get("wins", stat_map.get("W", 0))
+                draws     = stat_map.get("ties", stat_map.get("D", stat_map.get("draws", 0)))
+                scored    = stat_map.get("pointsFor", stat_map.get("GF", stat_map.get("goalsFor", 0)))
+                conceded  = stat_map.get("pointsAgainst", stat_map.get("GA", stat_map.get("goalsAgainst", 0)))
 
-        team_ids: dict[int, str] = {}  # id → name
-        for row in rows:
-            team = row.get("team", {})
-            team_id = team.get("id")
-            team_name = team.get("name", "")
-            if not (team_id and team_name):
-                continue
+                goals_pg    = round(scored   / played, 3)
+                conceded_pg = round(conceded / played, 3)
+                win_pct     = round(wins     / played, 3)
+                draw_pct    = round(draws    / played, 3)
 
-            played    = row.get("matches", 1) or 1
-            wins      = row.get("wins", 0)
-            draws     = row.get("draws", 0)
-            losses    = row.get("losses", 0)
-            scored    = row.get("scoresFor", 0)
-            conceded  = row.get("scoresAgainst", 0)
+                stats[team_name] = {
+                    "goals_per_game":    goals_pg,
+                    "conceded_per_game": conceded_pg,
+                    "xg_per_game":       goals_pg,
+                    "xga_per_game":      conceded_pg,
+                    "win_pct":           win_pct,
+                    "draw_pct":          draw_pct,
+                    "poss":              50.0,
+                    "form_xg":           goals_pg,
+                    "form_xga":          conceded_pg,
+                    "matches":           int(played),
+                }
 
-            goals_pg    = round(scored / played, 3)
-            conceded_pg = round(conceded / played, 3)
-            win_pct     = round(wins / played, 3)
-            draw_pct    = round(draws / played, 3)
+    if stats:
+        await log(f"✅ ESPN standings stats: {len(stats)} equipos para {league_key}")
+        return stats
 
-            stats[team_name] = {
-                "goals_per_game":    goals_pg,
-                "conceded_per_game": conceded_pg,
-                "xg_per_game":       goals_pg,     # proxy (SofaScore public API doesn't expose xG)
-                "xga_per_game":      conceded_pg,  # proxy
-                "win_pct":           win_pct,
-                "draw_pct":          draw_pct,
-                "poss":              50.0,  # default (not in public standings)
-                "form_xg":           goals_pg,
-                "form_xga":          conceded_pg,
-                "matches":           played,
-                "_team_id":          team_id,
-            }
-            team_ids[team_id] = team_name
+    # ── Fallback: compute stats from recent ESPN scoreboard results ───────────
+    await log(f"🔄 ESPN standings vacío — calculando stats de resultados recientes...")
+    try:
+        from datetime import datetime, timedelta, timezone
+        today  = datetime.now(timezone.utc)
+        start  = (today - timedelta(days=90)).strftime("%Y%m%d")
+        end    = today.strftime("%Y%m%d")
+        sb_url = f"{ESPN_BASE_SITE}/soccer/{espn_key}/scoreboard?dates={start}-{end}&limit=200"
+        sb_data = await _espn_fetch(sb_url)
+        if sb_data:
+            team_agg: dict[str, dict] = {}
+            for event in sb_data.get("events", []):
+                comp = event.get("competitions", [{}])[0]
+                if comp.get("status", {}).get("type", {}).get("name", "") not in ("STATUS_FINAL", "STATUS_FULL_TIME"):
+                    continue
+                for side in comp.get("competitors", []):
+                    name = side.get("team", {}).get("displayName") or side.get("team", {}).get("name") or ""
+                    if not name:
+                        continue
+                    gf = int(side.get("score", 0) or 0)
+                    other = next((c for c in comp.get("competitors", []) if c != side), {})
+                    ga = int(other.get("score", 0) or 0)
+                    won  = side.get("winner", False)
+                    draw = gf == ga
 
-        # Enrich with recent form (last 5 matches) for top teams
-        for team_id, team_name in list(team_ids.items())[:20]:  # limit API calls
-            form_url = f"{SOFA_BASE}/team/{team_id}/events/last/0"
-            form_data = await _fetch_json(client, form_url)
-            if not form_data:
-                continue
+                    if name not in team_agg:
+                        team_agg[name] = {"played": 0, "wins": 0, "draws": 0, "gf": 0, "ga": 0}
+                    team_agg[name]["played"] += 1
+                    team_agg[name]["gf"]     += gf
+                    team_agg[name]["ga"]     += ga
+                    if won:    team_agg[name]["wins"]  += 1
+                    if draw:   team_agg[name]["draws"] += 1
 
-            events = form_data.get("events", [])
-            # Filter finished matches for this team
-            finished = [
-                e for e in events
-                if e.get("status", {}).get("code") in (100, 120)
-            ][-5:]  # last 5
+            for tname, agg in team_agg.items():
+                p = agg["played"] or 1
+                gfpg = round(agg["gf"] / p, 3)
+                gapg = round(agg["ga"] / p, 3)
+                stats[tname] = {
+                    "goals_per_game":    gfpg,
+                    "conceded_per_game": gapg,
+                    "xg_per_game":       gfpg,
+                    "xga_per_game":      gapg,
+                    "win_pct":           round(agg["wins"]  / p, 3),
+                    "draw_pct":          round(agg["draws"] / p, 3),
+                    "poss":              50.0,
+                    "form_xg":           gfpg,
+                    "form_xga":          gapg,
+                    "matches":           p,
+                }
+    except Exception as e:
+        logger.warning(f"ESPN scoreboard stats failed: {e}")
 
-            if not finished:
-                continue
-
-            form_goals, form_conceded = 0, 0
-            for e in finished:
-                is_home = e.get("homeTeam", {}).get("id") == team_id
-                hs = e.get("homeScore", {}).get("current", 0) or 0
-                as_ = e.get("awayScore", {}).get("current", 0) or 0
-                if is_home:
-                    form_goals    += hs
-                    form_conceded += as_
-                else:
-                    form_goals    += as_
-                    form_conceded += hs
-
-            n = len(finished) or 1
-            stats[team_name]["form_xg"]  = round(form_goals / n, 3)
-            stats[team_name]["form_xga"] = round(form_conceded / n, 3)
-            await asyncio.sleep(0.2)
-
-    await log(f"✅ SofaScore stats: {len(stats)} equipos para {league_key}")
+    await log(f"✅ ESPN computed stats: {len(stats)} equipos para {league_key}")
     return stats
 
 
@@ -434,65 +484,94 @@ async def get_nba_team_stats(
     log_queue: Optional[asyncio.Queue] = None,
 ) -> dict[str, dict]:
     """
-    Fetch NBA team stats from SofaScore standings.
-    Returns dict keyed by team name with model-ready stats.
+    Fetch NBA team stats from ESPN standings API.
     """
     async def log(msg: str):
         logger.info(msg)
         if log_queue:
             await log_queue.put({"type": "log", "message": msg})
 
-    await log("📊 SofaScore: cargando stats NBA...")
+    await log("📊 ESPN: cargando standings NBA...")
     stats: dict[str, dict] = {}
 
-    async with httpx.AsyncClient() as client:
-        season_id = await _get_current_season_id(client, NBA_UNIQUE_TOURNAMENT_ID)
-        if not season_id:
-            await log("⚠️ No se pudo obtener season NBA de SofaScore")
-            return {}
+    standings_url = f"{ESPN_V2_BASE}/basketball/nba/standings"
+    data = await _espn_fetch(standings_url)
 
-        url = f"{SOFA_BASE}/unique-tournament/{NBA_UNIQUE_TOURNAMENT_ID}/season/{season_id}/standings/total"
-        data = await _fetch_json(client, url)
-        if not data:
-            await log("⚠️ SofaScore NBA standings vacío")
-            return {}
+    if data:
+        children = data.get("children", []) or [data]
+        for child in children:
+            entries = child.get("standings", {}).get("entries", [])
+            for entry in entries:
+                team_name = (entry.get("team", {}).get("displayName") or
+                             entry.get("team", {}).get("name") or "")
+                if not team_name:
+                    continue
+                stat_map: dict[str, float] = {}
+                for s in entry.get("stats", []):
+                    k = s.get("name") or s.get("abbreviation") or ""
+                    v = s.get("value")
+                    if k and v is not None:
+                        try: stat_map[k] = float(v)
+                        except: pass
 
-        rows = []
-        for grp in data.get("standings", []):
-            rows.extend(grp.get("rows", []))
+                played = stat_map.get("gamesPlayed", stat_map.get("GP", 1)) or 1
+                wins   = stat_map.get("wins", stat_map.get("W", 0))
+                pts    = stat_map.get("ppg", stat_map.get("pointsPerGame", stat_map.get("avgPoints", 110.0)))
+                opp    = stat_map.get("oppg", stat_map.get("oppPointsPerGame", stat_map.get("avgPointsAgainst", 110.0)))
+                win_pct = round(wins / played, 3)
 
-        for row in rows:
-            team = row.get("team", {})
-            name = team.get("name", "")
-            if not name:
-                continue
+                stats[team_name] = {
+                    "pts_per_game":       float(pts or 110.0),
+                    "opp_pts_per_game":   float(opp or 110.0),
+                    "fg_pct":             stat_map.get("fieldGoalPct", stat_map.get("fgPct", 0.46)),
+                    "three_p_pct":        stat_map.get("threePointPct", stat_map.get("fg3Pct", 0.36)),
+                    "reb_per_game":       stat_map.get("reboundsPerGame", stat_map.get("avgRebounds", 44.0)),
+                    "ast_per_game":       stat_map.get("assistsPerGame", stat_map.get("avgAssists", 24.0)),
+                    "last5_wins_pct":     win_pct,
+                    "home_wins_pct":      min(win_pct * 1.1, 0.95),
+                    "days_rest":          2.0,
+                    "is_back_to_back":    0.0,
+                    "win_pct":            win_pct,
+                }
 
-            played = row.get("matches", 1) or 1
-            wins   = row.get("wins", 0)
-            losses = row.get("losses", 0)
-            # SofaScore standings for NBA: scoresFor = total points scored
-            pts_for     = row.get("scoresFor", 0)
-            pts_against = row.get("scoresAgainst", 0)
+    if not stats:
+        # Fallback: compute from recent scoreboard
+        await log("🔄 ESPN standings NBA vacío — calculando de scoreboard...")
+        from datetime import datetime, timedelta, timezone
+        today = datetime.now(timezone.utc)
+        start = (today - timedelta(days=60)).strftime("%Y%m%d")
+        end   = today.strftime("%Y%m%d")
+        sb_data = await _espn_fetch(f"{ESPN_BASE_SITE}/basketball/nba/scoreboard?dates={start}-{end}&limit=200")
+        if sb_data:
+            agg: dict[str, dict] = {}
+            for event in sb_data.get("events", []):
+                comp = event.get("competitions", [{}])[0]
+                if "FINAL" not in (comp.get("status", {}).get("type", {}).get("name") or ""):
+                    continue
+                for side in comp.get("competitors", []):
+                    name = side.get("team", {}).get("displayName") or ""
+                    if not name: continue
+                    pts = int(side.get("score", 0) or 0)
+                    other = next((c for c in comp.get("competitors", []) if c != side), {})
+                    opp_pts = int(other.get("score", 0) or 0)
+                    if name not in agg:
+                        agg[name] = {"played": 0, "wins": 0, "pts": 0, "opp": 0}
+                    agg[name]["played"] += 1
+                    agg[name]["pts"]    += pts
+                    agg[name]["opp"]    += opp_pts
+                    if side.get("winner"): agg[name]["wins"] += 1
+            for tname, a in agg.items():
+                p = a["played"] or 1
+                w = round(a["wins"] / p, 3)
+                stats[tname] = {
+                    "pts_per_game":     round(a["pts"] / p, 1),
+                    "opp_pts_per_game": round(a["opp"] / p, 1),
+                    "fg_pct": 0.46, "three_p_pct": 0.36, "reb_per_game": 44.0,
+                    "ast_per_game": 24.0, "last5_wins_pct": w, "home_wins_pct": min(w*1.1, 0.95),
+                    "days_rest": 2.0, "is_back_to_back": 0.0, "win_pct": w,
+                }
 
-            pts_pg     = round(pts_for / played, 1)     if pts_for     else 110.0
-            opp_pts_pg = round(pts_against / played, 1) if pts_against else 110.0
-            win_pct    = round(wins / played, 3)
-
-            stats[name] = {
-                "pts_per_game":       pts_pg,
-                "opp_pts_per_game":   opp_pts_pg,
-                "fg_pct":             0.46,   # not in public standings, use league avg
-                "three_p_pct":        0.36,
-                "reb_per_game":       44.0,
-                "ast_per_game":       24.0,
-                "last5_wins_pct":     win_pct,
-                "home_wins_pct":      min(win_pct * 1.1, 0.95),
-                "days_rest":          2.0,
-                "is_back_to_back":    0.0,
-                "win_pct":            win_pct,
-            }
-
-    await log(f"✅ SofaScore NBA stats: {len(stats)} equipos")
+    await log(f"✅ ESPN NBA stats: {len(stats)} equipos")
     return stats
 
 

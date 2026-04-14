@@ -239,6 +239,16 @@ class NBAStatsScraper:
                 await log_queue.put({"type": "log", "message": msg})
 
         await log(f"📊 Scrapeando estadísticas de temporada NBA {season}...")
+
+        # ── ESPN first (basketball-reference blocked on Railway) ──────────────
+        try:
+            from scrapers.sofascore_scraper import get_nba_team_stats
+            espn_stats = await get_nba_team_stats(log_queue=log_queue)
+            if espn_stats:
+                return espn_stats
+        except Exception as e:
+            logger.warning(f"ESPN NBA stats failed: {e}")
+
         stats = {}
 
         async with httpx.AsyncClient() as client:
