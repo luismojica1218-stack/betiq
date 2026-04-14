@@ -119,23 +119,79 @@ async def _run_odds_bg(session_id: str, source: str):
     if not queue:
         return
     try:
-        result = await run_football_odds_scrape(source, queue)
-        odds   = result.get("odds", [])
+        result   = await run_football_odds_scrape(source, queue)
+        odds     = result.get("odds", [])
         supabase = get_supabase()
-        saved  = 0
+        saved    = 0
+        scraped_at = datetime.now(timezone.utc).isoformat()
+
         for odd in odds:
             try:
-                supabase.table("odds").insert({
-                    "bookmaker":  odd.get("bookmaker", source),
-                    "market":    "1X2",
-                    "selection": "home",
-                    "odd_value": odd.get("home_win_odd", 2.0),
-                    "scraped_at": datetime.now(timezone.utc).isoformat(),
-                }).execute()
+                home_name = odd.get("home_team", "")
+                away_name = odd.get("away_team", "")
+                if not (home_name and away_name):
+                    continue
+
+                # Upsert teams
+                for name in [home_name, away_name]:
+                    supabase.table("teams").upsert(
+                        {"name": name, "sport": "football"},
+                        on_conflict="name,sport"
+                    ).execute()
+
+                # Lookup team IDs
+                home_r = supabase.table("teams").select("id").eq("name", home_name).eq("sport", "football").execute()
+                away_r = supabase.table("teams").select("id").eq("name", away_name).eq("sport", "football").execute()
+                if not (home_r.data and away_r.data):
+                    continue
+
+                home_id = home_r.data[0]["id"]
+                away_id = away_r.data[0]["id"]
+
+                # Find or create match
+                match_r = supabase.table("matches").select("id").eq("home_team_id", home_id).eq("away_team_id", away_id).eq("sport", "football").gte("match_date", datetime.now(timezone.utc).isoformat()).limit(1).execute()
+                if match_r.data:
+                    match_id = match_r.data[0]["id"]
+                else:
+                    from datetime import timedelta
+                    new_match = supabase.table("matches").insert({
+                        "sport":        "football",
+                        "home_team_id": home_id,
+                        "away_team_id": away_id,
+                        "match_date":   (datetime.now(timezone.utc) + timedelta(days=3)).isoformat(),
+                        "status":       "scheduled",
+                        "scraped_at":   scraped_at,
+                    }).execute()
+                    if not new_match.data:
+                        continue
+                    match_id = new_match.data[0]["id"]
+
+                # Save all markets
+                markets = [
+                    ("1X2", "home", odd.get("home_win_odd")),
+                    ("1X2", "draw", odd.get("draw_odd")),
+                    ("1X2", "away", odd.get("away_win_odd")),
+                ]
+                for market, selection, odd_val in markets:
+                    if odd_val is not None:
+                        try:
+                            supabase.table("odds").insert({
+                                "match_id":   match_id,
+                                "bookmaker":  source,
+                                "market":     market,
+                                "selection":  selection,
+                                "odd_value":  float(odd_val),
+                                "scraped_at": scraped_at,
+                            }).execute()
+                        except Exception:
+                            pass
+
                 saved += 1
-            except Exception:
-                pass
-        await queue.put({"type": "done", "message": f"✅ {saved} cuotas de fútbol guardadas ({source})", "result": {"count": saved}})
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning(f"Football odds save error: {exc}")
+
+        await queue.put({"type": "done", "message": f"✅ {saved} partidos de fútbol con cuotas guardados ({source})", "result": {"count": saved}})
     except Exception as e:
         if queue:
             await queue.put({"type": "error", "message": str(e)})

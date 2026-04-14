@@ -19,7 +19,20 @@ from constants import (
 )
 
 logger = logging.getLogger(__name__)
-FBREF_BASE = "https://fbref.com"
+FBREF_BASE  = "https://fbref.com"
+ESPN_BASE   = "https://site.api.espn.com/apis/site/v2/sports/soccer"
+
+# fbref league key → ESPN soccer league key
+FBREF_TO_ESPN: dict[str, str] = {
+    "premier-league":     "eng.1",
+    "la-liga":            "esp.1",
+    "bundesliga":         "ger.1",
+    "serie-a":            "ita.1",
+    "ligue-1":            "fra.1",
+    "champions-league":   "uefa.champions",
+    "libertadores":       "conmebol.libertadores",
+    "copa-sudamericana":  "conmebol.sudamericana",
+}
 
 
 async def _random_delay():
@@ -45,6 +58,81 @@ async def _fetch_html(client: httpx.AsyncClient, url: str) -> Optional[str]:
             if attempt < MAX_RETRIES - 1:
                 await asyncio.sleep(2 ** attempt * 2)
     return None
+
+
+async def _espn_football_fixtures(
+    league_key: str,
+    league_name: str,
+    log_queue: Optional[asyncio.Queue] = None,
+) -> list[dict]:
+    """Fallback: get upcoming fixtures from ESPN public API (no auth needed)."""
+    async def log(msg: str):
+        logger.info(msg)
+        if log_queue:
+            await log_queue.put({"type": "log", "message": msg})
+
+    espn_key = FBREF_TO_ESPN.get(league_key)
+    if not espn_key:
+        return []
+
+    url = f"{ESPN_BASE}/{espn_key}/scoreboard"
+    await log(f"🔄 Usando ESPN como fuente alternativa para {league_name}...")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(url, headers={"Accept": "application/json"}, timeout=20.0)
+            if not r.is_success:
+                return []
+            data = r.json()
+    except Exception as e:
+        logger.warning(f"ESPN fallback failed for {league_key}: {e}")
+        return []
+
+    today = datetime.now(timezone.utc)
+    limit = today + timedelta(days=10)
+    fixtures = []
+
+    for event in data.get("events", []):
+        comp = event.get("competitions", [{}])[0]
+        competitors = comp.get("competitors", [])
+        home = next((c for c in competitors if c.get("homeAway") == "home"), None)
+        away = next((c for c in competitors if c.get("homeAway") == "away"), None)
+        if not (home and away):
+            continue
+
+        home_name = home.get("team", {}).get("displayName") or home.get("team", {}).get("name", "")
+        away_name = away.get("team", {}).get("displayName") or away.get("team", {}).get("name", "")
+        date_str  = event.get("date", "")
+        status_name = comp.get("status", {}).get("type", {}).get("name", "")
+
+        if not (home_name and away_name and date_str):
+            continue
+
+        try:
+            match_dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+
+        # Only upcoming
+        if match_dt < today or match_dt > limit:
+            continue
+        if "FINAL" in status_name or "POST" in status_name:
+            continue
+
+        fixtures.append({
+            "home_team":  home_name,
+            "away_team":  away_name,
+            "match_date": match_dt.isoformat(),
+            "league":     league_name,
+            "league_key": league_key,
+            "season":     "2025-26",
+            "sport":      "football",
+            "status":     "scheduled",
+            "source":     "espn",
+        })
+
+    await log(f"✅ ESPN: {len(fixtures)} fixtures encontrados para {league_name}")
+    return fixtures
 
 
 class FbrefFootballScraper:
@@ -86,7 +174,7 @@ class FbrefFootballScraper:
             html = await _fetch_html(client, url)
             if not html:
                 await log(f"⚠️ No se pudo conectar con fbref para {league_cfg['name']}")
-                return fixtures
+                return await _espn_football_fixtures(league_key, league_cfg["name"], log_queue)
 
         soup = BeautifulSoup(html, "lxml")
         table = soup.find("table", {"id": lambda x: x and "sched_" in x})

@@ -53,29 +53,34 @@ async def _run_stats_bg(session_id: str, tour: str):
         saved    = 0
         for m in matches:
             try:
-                for pname in [m.get("player1", ""), m.get("player2", "")]:
-                    if pname:
-                        supabase.table("teams").upsert(
-                            {"name": pname, "sport": "tennis", "league": m.get("tour", tour)},
-                            on_conflict="name,sport"
-                        ).execute()
-                p1r = supabase.table("teams").select("id").eq("name", m.get("player1")).eq("sport","tennis").execute()
-                p2r = supabase.table("teams").select("id").eq("name", m.get("player2")).eq("sport","tennis").execute()
+                player1 = m.get("player1", "")
+                player2 = m.get("player2", "")
+                match_date = m.get("match_date")
+                if not (player1 and player2 and match_date):
+                    continue
+                for pname in [player1, player2]:
+                    supabase.table("teams").upsert(
+                        {"name": pname, "sport": "tennis", "league": m.get("tour", tour)},
+                        on_conflict="name,sport"
+                    ).execute()
+                p1r = supabase.table("teams").select("id").eq("name", player1).eq("sport","tennis").execute()
+                p2r = supabase.table("teams").select("id").eq("name", player2).eq("sport","tennis").execute()
                 if p1r.data and p2r.data:
+                    # Use upsert to avoid duplicate key errors on repeated scrapes
                     supabase.table("matches").insert({
                         "sport":        "tennis",
                         "league":       m.get("tour", tour),
                         "season":       "2026",
+                        "round":        m.get("round", ""),
                         "home_team_id": p1r.data[0]["id"],
                         "away_team_id": p2r.data[0]["id"],
-                        "match_date":   m.get("match_date"),
+                        "match_date":   match_date,
                         "status":       "scheduled",
-                        "metadata":     json.dumps({"surface": m.get("surface"), "tournament": m.get("tournament"), "round": m.get("round")}),
                         "scraped_at":   datetime.now(timezone.utc).isoformat(),
                     }).execute()
                     saved += 1
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(f"Tennis match save error: {exc}")
 
         await queue.put({
             "type": "done",
