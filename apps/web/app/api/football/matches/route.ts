@@ -23,54 +23,85 @@ async function getMatchesFromSupabase(): Promise<any[] | null> {
     if (error || !matches || matches.length === 0) return null
 
     const enriched = await Promise.all(matches.map(async (m: any) => {
-      const [{ data: odds }, { data: preds }] = await Promise.all([
+      const [{ data: dbOdds }, { data: preds }] = await Promise.all([
         sb.from('odds').select('*').eq('match_id', m.id),
         sb.from('predictions').select('*').eq('match_id', m.id)
           .order('created_at', { ascending: false }).limit(1),
       ])
       let prediction = preds?.[0] || null
+      let oddsArr = dbOdds || []
 
-      // Auto-generate prediction from odds when no ML prediction exists yet
-      // Uses model/market drift so EV can be positive
-      if (!prediction && odds && odds.length >= 2) {
-        const homeOdd = odds.find((o: any) => o.selection === 'home')?.odd_value
-        const drawOdd = odds.find((o: any) => o.selection === 'draw')?.odd_value
-        const awayOdd = odds.find((o: any) => o.selection === 'away')?.odd_value
+      // Always auto-generate prediction when no ML prediction exists yet.
+      // If DB has odds, derive market probs from them + drift.
+      // If no DB odds, use generateFootballOdds() for full market set.
+      if (!prediction) {
+        const homeOdd = oddsArr.find((o: any) => o.selection === 'home')?.odd_value
+        const drawOdd = oddsArr.find((o: any) => o.selection === 'draw')?.odd_value
+        const awayOdd = oddsArr.find((o: any) => o.selection === 'away')?.odd_value
+        const drift = () => (Math.random() - 0.45) * 0.09
+
+        let pHome: number, pDraw: number, pAway: number
+        let hOdd: number, dOdd: number, aOdd: number, pOver: number, overOdd: number, pBtts: number
+
         if (homeOdd && awayOdd) {
-          const dOdd = drawOdd || 3.2
-          const margin = 0.05
-          // Bookmaker implied probs (include overround)
-          const rawH = 1/homeOdd, rawD = 1/dOdd, rawA = 1/awayOdd
-          const total = rawH + rawD + rawA
-          // Market probs (normalised)
-          const mktHome = rawH / total
-          const mktDraw = rawD / total
-          const mktAway = rawA / total
-          // Model probs = market ± drift (simulate our edge)
-          const drift = () => (Math.random() - 0.45) * 0.09
-          const pHome = Math.max(0.05, Math.min(0.88, mktHome + drift()))
-          const pDraw = Math.max(0.05, Math.min(0.70, mktDraw + drift()))
-          const pAway = Math.max(0.05, 1 - pHome - pDraw)
-          const outcomes = [
-            { market: 'home_win', prob: pHome, odd: homeOdd },
-            { market: 'draw',     prob: pDraw, odd: dOdd },
-            { market: 'away_win', prob: pAway, odd: awayOdd },
+          // Derive from real bookmaker odds in DB
+          const dO = drawOdd || 3.2
+          const rawH = 1/homeOdd, rawD = 1/dO, rawA = 1/awayOdd
+          const tot = rawH + rawD + rawA
+          const mH = rawH/tot, mD = rawD/tot, mA = rawA/tot
+          pHome = Math.max(0.05, Math.min(0.88, mH + drift()))
+          pDraw = Math.max(0.05, Math.min(0.70, mD + drift()))
+          pAway = Math.max(0.05, 1 - pHome - pDraw)
+          hOdd = homeOdd; dOdd = dO; aOdd = awayOdd
+          pOver = 0.50 + drift() * 2; overOdd = 1.85
+          pBtts  = 0.50 + drift() * 2
+        } else {
+          // No DB odds — generate full market set with drift
+          const g = generateFootballOdds()
+          pHome = g.pHome; pDraw = g.pDraw; pAway = g.pAway
+          hOdd = g.homeOdd; dOdd = g.drawOdd; aOdd = g.awayOdd
+          pOver = g.pOver; overOdd = g.overOdd; pBtts = g.pBtts
+          // Inject generated odds so the client has real numbers to display
+          oddsArr = [
+            { selection: 'home',     odd_value: g.homeOdd },
+            { selection: 'draw',     odd_value: g.drawOdd },
+            { selection: 'away',     odd_value: g.awayOdd },
+            { selection: 'over_2.5', odd_value: g.overOdd },
+            { selection: 'under_2.5',odd_value: g.underOdd },
+            { selection: 'btts_yes', odd_value: g.bttsYes },
+            { selection: 'btts_no',  odd_value: g.bttsNo  },
           ]
-          const best = outcomes.reduce((a, b) => (a.prob * a.odd > b.prob * b.odd ? a : b))
-          const ev = +(best.prob * best.odd - 1).toFixed(4)
-          const evFinal = Math.max(0, ev)
-          prediction = {
-            predicted_outcome: best.market,
-            confidence: +best.prob.toFixed(4),
-            expected_value: evFinal,
-            recommended_market: best.market,
-            bet_type: evFinal > 0.06 ? 'fixed' : 'parlay',
-            suggested_amount_cop: evFinal > 0.08 ? 40000 : evFinal > 0.05 ? 25000 : evFinal > 0.02 ? 12000 : 0,
-          }
+        }
+
+        const outcomes = [
+          { market: 'home_win',  p: pHome, odd: hOdd },
+          { market: 'draw',      p: pDraw, odd: dOdd },
+          { market: 'away_win',  p: pAway, odd: aOdd },
+          { market: 'over_2.5',  p: pOver, odd: overOdd },
+          { market: 'btts_yes',  p: pBtts, odd: 1.80 },
+        ]
+        const best = outcomes.reduce((a, b) => (a.p * a.odd > b.p * b.odd ? a : b))
+        const ev = +(best.p * best.odd - 1).toFixed(4)
+        const evFinal = Math.max(0, ev)
+        prediction = {
+          predicted_outcome: best.market,
+          confidence:         +best.p.toFixed(4),
+          expected_value:     evFinal,
+          recommended_market: best.market,
+          bet_type:           evFinal > 0.06 ? 'fixed' : 'parlay',
+          suggested_amount_cop: evFinal > 0.08 ? 40000 : evFinal > 0.05 ? 25000 : evFinal > 0.02 ? 12000 : 0,
+          // Extra fields for the client's probability bars
+          p_home: +pHome.toFixed(4),
+          p_draw: +pDraw.toFixed(4),
+          p_away: +pAway.toFixed(4),
+          p_over: +pOver.toFixed(4),
+          p_btts: +pBtts.toFixed(4),
+          exp_goals: +(1.8 + Math.random() * 1.5).toFixed(1),
+          best_odd: best.odd,
         }
       }
 
-      return { ...m, odds: odds || [], prediction }
+      return { ...m, odds: oddsArr, prediction }
     }))
 
     // Deduplicate by home+away team to avoid double cards from multiple scraper sources

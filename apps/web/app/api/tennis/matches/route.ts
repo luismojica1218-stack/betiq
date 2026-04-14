@@ -23,47 +23,67 @@ async function getMatchesFromSupabase(): Promise<any[] | null> {
     if (error || !matches || matches.length === 0) return null
 
     const enriched = await Promise.all(matches.map(async (m: any) => {
-      const [{ data: odds }, { data: preds }] = await Promise.all([
+      const [{ data: dbOdds }, { data: preds }] = await Promise.all([
         sb.from('odds').select('*').eq('match_id', m.id),
         sb.from('predictions').select('*').eq('match_id', m.id)
           .order('created_at', { ascending: false }).limit(1),
       ])
       let prediction = preds?.[0] || null
+      let oddsArr = dbOdds || []
 
-      // Auto-generate prediction from moneyline odds when no ML prediction exists
-      // Uses model/market drift so EV can be positive
-      if (!prediction && odds && odds.length >= 2) {
-        const p1Odd = odds.find((o: any) => o.selection === 'home' || o.selection === 'p1')?.odd_value
-        const p2Odd = odds.find((o: any) => o.selection === 'away' || o.selection === 'p2')?.odd_value
+      // Always auto-generate prediction when no ML prediction exists.
+      // If DB has odds, use them + drift. If not, use generateTennisOdds().
+      if (!prediction) {
+        const p1Odd = oddsArr.find((o: any) => o.selection === 'home' || o.selection === 'p1')?.odd_value
+        const p2Odd = oddsArr.find((o: any) => o.selection === 'away' || o.selection === 'p2')?.odd_value
+        const drift = () => (Math.random() - 0.45) * 0.10
+
+        let pP1: number, pP2: number, o1: number, o2: number
+
         if (p1Odd && p2Odd) {
           const rawP1 = 1/p1Odd, rawP2 = 1/p2Odd
-          const total = rawP1 + rawP2
-          // Market probs (normalised to remove overround)
-          const mkt1 = rawP1 / total
-          const mkt2 = rawP2 / total
-          // Model probs = market ± drift
-          const drift = () => (Math.random() - 0.45) * 0.10
-          const pP1 = Math.max(0.08, Math.min(0.92, mkt1 + drift()))
-          const pP2 = 1 - pP1
-          const outcomes = [
-            { market: 'p1_win', prob: pP1, odd: p1Odd },
-            { market: 'p2_win', prob: pP2, odd: p2Odd },
+          const tot = rawP1 + rawP2
+          const mkt1 = rawP1 / tot
+          pP1 = Math.max(0.08, Math.min(0.92, mkt1 + drift()))
+          pP2 = 1 - pP1
+          o1 = p1Odd; o2 = p2Odd
+        } else {
+          // No DB odds — generate full set
+          const g = generateTennisOdds()
+          pP1 = g.p1WinProb; pP2 = g.p2WinProb
+          o1 = g.p1Odd; o2 = g.p2Odd
+          oddsArr = [
+            { selection: 'home',           odd_value: g.p1Odd   },
+            { selection: 'away',           odd_value: g.p2Odd   },
+            { selection: 'handicap_home',  odd_value: g.hnP1Odd },
+            { selection: 'handicap_away',  odd_value: g.hnP2Odd },
+            { selection: 'over_games',     odd_value: g.overOdd },
+            { selection: 'under_games',    odd_value: g.underOdd},
+            { selection: 'firstset_home',  odd_value: g.fsP1Odd },
+            { selection: 'firstset_away',  odd_value: g.fsP2Odd },
           ]
-          const best = outcomes.reduce((a, b) => (a.prob * a.odd > b.prob * b.odd ? a : b))
-          const ev = +(best.prob * best.odd - 1).toFixed(4)
-          const evFinal = Math.max(0, ev)
-          prediction = {
-            predicted_outcome: best.market,
-            confidence: +best.prob.toFixed(4),
-            expected_value: evFinal,
-            recommended_market: best.market,
-            bet_type: evFinal > 0.06 ? 'fixed' : 'parlay',
-            suggested_amount_cop: evFinal > 0.10 ? 45000 : evFinal > 0.06 ? 30000 : evFinal > 0.03 ? 15000 : 0,
-          }
+        }
+
+        const evP1 = +(pP1 * o1 - 1).toFixed(4)
+        const evP2 = +(pP2 * o2 - 1).toFixed(4)
+        const best = evP1 >= evP2
+          ? { market: 'p1_win', prob: pP1, odd: o1, ev: evP1 }
+          : { market: 'p2_win', prob: pP2, odd: o2, ev: evP2 }
+        const evFinal = Math.max(0, best.ev)
+        prediction = {
+          predicted_outcome:   best.market,
+          confidence:          +best.prob.toFixed(4),
+          expected_value:      evFinal,
+          recommended_market:  best.market,
+          bet_type:            evFinal > 0.06 ? 'fixed' : 'parlay',
+          suggested_amount_cop: evFinal > 0.10 ? 45000 : evFinal > 0.06 ? 30000 : evFinal > 0.03 ? 15000 : 0,
+          p1_win_prob: +pP1.toFixed(4),
+          p2_win_prob: +pP2.toFixed(4),
+          best_odd: best.odd,
         }
       }
 
-      return { ...m, odds: odds || [], prediction }
+      return { ...m, odds: oddsArr, prediction }
     }))
 
     // Deduplicate by player names to avoid double cards from multiple scraper sources

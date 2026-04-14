@@ -154,33 +154,53 @@ export default function FutbolClient() {
         if (res.ok) {
           const data = await res.json()
           if (data.matches && data.matches.length > 0) {
+             // Normalize league name → slug that matches the LEAGUES tab keys
+             const leagueSlug = (raw: string) => {
+               const s = (raw || '').toLowerCase().replace(/\s+/g, '-')
+               if (s.includes('libertadores'))  return 'libertadores'
+               if (s.includes('sudamericana'))  return 'copa-sudamericana'
+               if (s.includes('mundial') || s.includes('world-cup') || s.includes('fifa-2026')) return 'world-cup-2026'
+               if (s.includes('champions'))     return 'champions-league'
+               if (s.includes('premier'))       return 'premier-league'
+               if (s.includes('bundesliga'))    return 'bundesliga'
+               if (s.includes('serie') && s.includes('a')) return 'serie-a'
+               if (s.includes('ligue'))         return 'ligue-1'
+               if (s.includes('liga') || s.includes('laliga')) return 'la-liga'
+               return s || 'all'
+             }
+
              const mapped = data.matches.map((m: any) => {
                 const pred = m.prediction || {}
-                const homeOdd = m.odds?.find((o: any) => (o.selection || '').toLowerCase().includes('home'))?.odd_value || 2.10
-                const awayOdd = m.odds?.find((o: any) => (o.selection || '').toLowerCase().includes('away'))?.odd_value || 3.30
-                const drawOdd = m.odds?.find((o: any) => (o.selection || '').toLowerCase().includes('draw'))?.odd_value || 3.10
-                
+                const odds = m.odds || []
+                const homeOdd = odds.find((o: any) => o.selection === 'home')?.odd_value || 2.10
+                const awayOdd = odds.find((o: any) => o.selection === 'away')?.odd_value || 3.30
+                const drawOdd = odds.find((o: any) => o.selection === 'draw')?.odd_value || 3.10
+                const overOdd = odds.find((o: any) => o.selection === 'over_2.5')?.odd_value || 1.90
+                const underOdd = odds.find((o: any) => o.selection === 'under_2.5')?.odd_value || 1.90
+                const bttsYes = odds.find((o: any) => o.selection === 'btts_yes')?.odd_value || 1.85
+                const bttsNo  = odds.find((o: any) => o.selection === 'btts_no')?.odd_value  || 1.85
+
                 return {
                   id: m.id,
-                  league: m.league?.toLowerCase().replace(/\s+/g, '-') || 'all',
+                  league: leagueSlug(m.league || ''),
                   homeTeam: m.home_team?.name || 'Local',
                   awayTeam: m.away_team?.name || 'Visitante',
                   date: new Date(m.match_date).toLocaleString('es-CO', {day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'}),
-                  odds: { home: homeOdd, draw: drawOdd, away: awayOdd },
-                  ouOdds: { over: 1.90, under: 1.90 },
-                  bttsOdds: { yes: 1.85, no: 1.85 },
+                  odds:     { home: homeOdd, draw: drawOdd, away: awayOdd },
+                  ouOdds:   { over: overOdd, under: underOdd },
+                  bttsOdds: { yes: bttsYes,  no: bttsNo },
                   pred: {
-                    pHome: pred.confidence || 0.45,
-                    pDraw: 0.25,
-                    pAway: 0.30,
-                    pOver: 0.50,
-                    pBtts: 0.50,
-                    expGoals: 2.5,
-                    bestMarket: pred.recommended_market || 'home_win',
-                    bestOdd: homeOdd,
-                    ev: pred.expected_value || 0,
-                    betType: pred.bet_type || 'fixed',
-                    amount: pred.suggested_amount_cop || 0,
+                    pHome:      pred.p_home || pred.confidence || 0.40,
+                    pDraw:      pred.p_draw || 0.25,
+                    pAway:      pred.p_away || 0.35,
+                    pOver:      pred.p_over || 0.50,
+                    pBtts:      pred.p_btts || 0.50,
+                    expGoals:   pred.exp_goals || 2.5,
+                    bestMarket: (pred.recommended_market || pred.best_market || 'home_win') as BestMarket,
+                    bestOdd:    pred.best_odd || homeOdd,
+                    ev:         pred.expected_value || 0,
+                    betType:    (pred.bet_type || 'fixed') as 'fixed' | 'parlay',
+                    amount:     pred.suggested_amount_cop || 0,
                   }
                 }
              })
