@@ -10,11 +10,12 @@ async function getMatchesFromSupabase(): Promise<any[] | null> {
 
     const sb  = createClient(url, key)
     const now = new Date().toISOString()
-    const end = new Date(Date.now() + 8 * 86_400_000).toISOString()
+    const end = new Date(Date.now() + 14 * 86_400_000).toISOString()  // 14 days
 
+    // Fetch without FK join to avoid PostgREST ambiguity
     const { data: matches, error } = await sb
       .from('matches')
-      .select('*, home_team:teams!home_team_id(name), away_team:teams!away_team_id(name)')
+      .select('*')
       .eq('sport', 'tennis')
       .gte('match_date', now)
       .lte('match_date', end)
@@ -22,7 +23,16 @@ async function getMatchesFromSupabase(): Promise<any[] | null> {
 
     if (error || !matches || matches.length === 0) return null
 
+    // Batch-fetch player names separately
+    const teamIds = [...new Set(matches.flatMap((m: any) => [m.home_team_id, m.away_team_id].filter(Boolean)))]
+    const { data: teamsData } = await sb.from('teams').select('id, name').in('id', teamIds)
+    const teamMap: Record<string, string> = {}
+    for (const t of teamsData || []) teamMap[t.id] = t.name
+
     const enriched = await Promise.all(matches.map(async (m: any) => {
+      const homeName = teamMap[m.home_team_id] || ''
+      const awayName = teamMap[m.away_team_id] || ''
+
       const [{ data: dbOdds }, { data: preds }] = await Promise.all([
         sb.from('odds').select('*').eq('match_id', m.id),
         sb.from('predictions').select('*').eq('match_id', m.id)
@@ -83,13 +93,19 @@ async function getMatchesFromSupabase(): Promise<any[] | null> {
         }
       }
 
-      return { ...m, odds: oddsArr, prediction }
+      return {
+        ...m,
+        home_team: { name: homeName },
+        away_team: { name: awayName },
+        odds: oddsArr,
+        prediction,
+      }
     }))
 
-    // Deduplicate by player names to avoid double cards from multiple scraper sources
+    // Deduplicate: same players + same date = same match
     const seen = new Set<string>()
     const deduped = enriched.filter((m: any) => {
-      const key = `${m.home_team?.name || m.home_team_id || ''}-${m.away_team?.name || m.away_team_id || ''}`
+      const key = `${m.home_team.name}-${m.away_team.name}-${m.match_date?.slice(0, 10)}`
       if (seen.has(key)) return false
       seen.add(key)
       return true

@@ -8,13 +8,14 @@ async function getMatchesFromSupabase(): Promise<any[] | null> {
     const key  = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
     if (!url || !key) return null
 
-    const sb   = createClient(url, key)
-    const now  = new Date().toISOString()
-    const end  = new Date(Date.now() + 8 * 86_400_000).toISOString()
+    const sb  = createClient(url, key)
+    const now = new Date().toISOString()
+    const end = new Date(Date.now() + 14 * 86_400_000).toISOString()  // 14 days
 
+    // Step 1 — fetch matches WITHOUT FK join (join is ambiguous and returns null names)
     const { data: matches, error } = await sb
       .from('matches')
-      .select('*, home_team:teams!home_team_id(name), away_team:teams!away_team_id(name)')
+      .select('*')
       .eq('sport', 'nba')
       .gte('match_date', now)
       .lte('match_date', end)
@@ -22,25 +23,31 @@ async function getMatchesFromSupabase(): Promise<any[] | null> {
 
     if (error || !matches || matches.length === 0) return null
 
+    // Step 2 — batch-fetch team names in a single query
+    const teamIds = [...new Set(matches.flatMap((m: any) => [m.home_team_id, m.away_team_id].filter(Boolean)))]
+    const { data: teamsData } = await sb.from('teams').select('id, name').in('id', teamIds)
+    const teamMap: Record<string, string> = {}
+    for (const t of teamsData || []) teamMap[t.id] = t.name
+
+    // Step 3 — enrich each match
     const enriched = await Promise.all(matches.map(async (m: any) => {
-      const [{ data: odds }, { data: preds }] = await Promise.all([
+      const homeName = teamMap[m.home_team_id] || ''
+      const awayName = teamMap[m.away_team_id] || ''
+
+      const [{ data: dbOdds }, { data: preds }] = await Promise.all([
         sb.from('odds').select('*').eq('match_id', m.id),
         sb.from('predictions').select('*').eq('match_id', m.id)
           .order('created_at', { ascending: false }).limit(1),
       ])
       let prediction = preds?.[0] || null
-      // finalOdds: DB odds if available, else generated — kept separate so
-      // it is never overridden by the destructured `odds` variable below
-      let finalOdds: any[] = odds || []
+      let finalOdds: any[] = dbOdds || []
 
       if (!prediction) {
         let homeOdd = finalOdds.find((o: any) => o.selection === 'home')?.odd_value
         let awayOdd = finalOdds.find((o: any) => o.selection === 'away')?.odd_value
 
-        // No DB odds → generate from NBA team strength lookup with drift
+        // No DB odds → generate from team strength lookup with drift
         if (!homeOdd || !awayOdd) {
-          const homeName = m.home_team?.name || ''
-          const awayName = m.away_team?.name  || ''
           const g = generateOdds(getStrength(homeName), getStrength(awayName))
           homeOdd = g.homeOdd
           awayOdd = g.awayOdd
@@ -70,19 +77,23 @@ async function getMatchesFromSupabase(): Promise<any[] | null> {
         }
       }
 
-      return { ...m, odds: finalOdds, prediction }
+      return {
+        ...m,
+        home_team: { name: homeName },
+        away_team: { name: awayName },
+        odds: finalOdds,
+        prediction,
+      }
     }))
 
-    // Deduplicate by team names to avoid double cards from multiple scraper sources
+    // Deduplicate: same teams + same date should only show once
     const seen = new Set<string>()
-    const deduped = enriched.filter((m: any) => {
-      const key = `${m.home_team?.name || m.home_team_id || ''}-${m.away_team?.name || m.away_team_id || ''}`
+    return enriched.filter((m: any) => {
+      const key = `${m.home_team.name}-${m.away_team.name}-${m.match_date?.slice(0, 10)}`
       if (seen.has(key)) return false
       seen.add(key)
       return true
     })
-
-    return deduped
   } catch {
     return null
   }
