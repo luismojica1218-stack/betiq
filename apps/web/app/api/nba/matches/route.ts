@@ -1,8 +1,45 @@
 import { NextResponse } from 'next/server'
+import { createClient } from '@supabase/supabase-js'
 
+// ── Supabase ─────────────────────────────────────────────────────────────────
+async function getMatchesFromSupabase(): Promise<any[] | null> {
+  try {
+    const url  = process.env.NEXT_PUBLIC_SUPABASE_URL
+    const key  = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+    if (!url || !key) return null
+
+    const sb   = createClient(url, key)
+    const now  = new Date().toISOString()
+    const end  = new Date(Date.now() + 8 * 86_400_000).toISOString()
+
+    const { data: matches, error } = await sb
+      .from('matches')
+      .select('*, home_team:teams!home_team_id(name), away_team:teams!away_team_id(name)')
+      .eq('sport', 'nba')
+      .gte('match_date', now)
+      .lte('match_date', end)
+      .order('match_date')
+
+    if (error || !matches || matches.length === 0) return null
+
+    const enriched = await Promise.all(matches.map(async (m: any) => {
+      const [{ data: odds }, { data: preds }] = await Promise.all([
+        sb.from('odds').select('*').eq('match_id', m.id),
+        sb.from('predictions').select('*').eq('match_id', m.id)
+          .order('created_at', { ascending: false }).limit(1),
+      ])
+      return { ...m, odds: odds || [], prediction: preds?.[0] || null }
+    }))
+
+    return enriched
+  } catch {
+    return null
+  }
+}
+
+// ── ESPN fallback ─────────────────────────────────────────────────────────────
 const ESPN_NBA = 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard'
 
-// NBA team strength map (approximate ELO tier for odds generation)
 const NBA_STRENGTH: Record<string, number> = {
   'Boston Celtics': 0.72, 'Oklahoma City Thunder': 0.70, 'Cleveland Cavaliers': 0.68,
   'Denver Nuggets': 0.67, 'Minnesota Timberwolves': 0.65, 'New York Knicks': 0.64,
@@ -17,105 +54,93 @@ const NBA_STRENGTH: Record<string, number> = {
 }
 
 function getStrength(name: string): number {
-  // Try exact match first, then partial
   if (NBA_STRENGTH[name]) return NBA_STRENGTH[name]
   const key = Object.keys(NBA_STRENGTH).find(k => name.includes(k.split(' ').pop()!))
   return key ? NBA_STRENGTH[key] : 0.50
 }
 
 function generateOdds(homeStr: number, awayStr: number) {
-  // Home court advantage ~+5%
   const adjHome = Math.min(0.85, homeStr + 0.05)
   const adjAway = Math.max(0.15, awayStr - 0.05)
   const total = adjHome + adjAway
   const pHome = adjHome / total
   const pAway = adjAway / total
-
-  // Add 4.5% bookmaker margin
   const margin = 0.045
-  const homeOdd = +((1 / pHome) * (1 - margin)).toFixed(2)
-  const awayOdd = +((1 / pAway) * (1 - margin)).toFixed(2)
-  return { homeOdd, awayOdd, pHome, pAway }
+  return {
+    homeOdd: +((1 / pHome) * (1 - margin)).toFixed(2),
+    awayOdd: +((1 / pAway) * (1 - margin)).toFixed(2),
+    pHome, pAway,
+  }
 }
 
-function getStatusKey(espnStatus: string): string {
-  if (espnStatus.includes('SCHEDULED') || espnStatus.includes('PRE')) return 'scheduled'
-  if (espnStatus.includes('IN_PROGRESS') || espnStatus.includes('LIVE')) return 'live'
-  if (espnStatus.includes('FINAL') || espnStatus.includes('POST')) return 'finished'
-  return 'scheduled'
+function espnStatus(s: string) {
+  if (s.includes('SCHEDULED') || s.includes('PRE')) return 'scheduled'
+  if (s.includes('IN_PROGRESS') || s.includes('LIVE')) return 'live'
+  return 'finished'
 }
 
+async function getMatchesFromESPN(): Promise<any[]> {
+  const today = new Date()
+  const end   = new Date(today.getTime() + 8 * 86_400_000)
+  const fmt   = (d: Date) => d.toISOString().slice(0, 10).replace(/-/g, '')
+  const res   = await fetch(`${ESPN_NBA}?dates=${fmt(today)}-${fmt(end)}`, {
+    next: { revalidate: 3600 },
+    headers: { Accept: 'application/json' },
+  })
+  if (!res.ok) return []
+  const data   = await res.json()
+  const events: any[] = data.events || []
+
+  return events.map((e: any) => {
+    const comp     = e.competitions?.[0]
+    if (!comp) return null
+    const homeComp = comp.competitors?.find((c: any) => c.homeAway === 'home')
+    const awayComp = comp.competitors?.find((c: any) => c.homeAway === 'away')
+    const homeName = homeComp?.team?.displayName || 'Local'
+    const awayName = awayComp?.team?.displayName || 'Visitante'
+    const { homeOdd, awayOdd, pHome, pAway } = generateOdds(
+      getStrength(homeName), getStrength(awayName)
+    )
+    const isHomeFav = pHome >= pAway
+    const confidence = Math.max(pHome, pAway)
+    const ev = +(confidence * (isHomeFav ? homeOdd : awayOdd) - 1).toFixed(4)
+
+    return {
+      id: e.id,
+      home_team: { name: homeName },
+      away_team: { name: awayName },
+      match_date: e.date,
+      status: espnStatus(comp.status?.type?.name || ''),
+      league: 'NBA',
+      odds: [
+        { selection: 'home', odd_value: homeOdd },
+        { selection: 'away', odd_value: awayOdd },
+      ],
+      prediction: {
+        predicted_outcome: isHomeFav ? 'home' : 'away',
+        confidence: +confidence.toFixed(4),
+        expected_value: ev > 0 ? ev : 0,
+        bet_type: confidence >= 0.65 ? 'fixed' : 'parlay',
+        suggested_amount_cop: ev > 0.07 ? 45000 : ev > 0.04 ? 28000 : ev > 0.02 ? 15000 : 0,
+      },
+    }
+  }).filter(Boolean)
+}
+
+// ── Handler ───────────────────────────────────────────────────────────────────
 export async function GET() {
   try {
-    const today = new Date()
-    const end = new Date(today.getTime() + 8 * 24 * 60 * 60 * 1000)
-    const fmt = (d: Date) => d.toISOString().slice(0, 10).replace(/-/g, '')
+    // 1. Try Supabase (real scraped data)
+    const sbMatches = await getMatchesFromSupabase()
+    if (sbMatches && sbMatches.length > 0) {
+      return NextResponse.json({ matches: sbMatches, source: 'supabase', count: sbMatches.length })
+    }
 
-    const res = await fetch(`${ESPN_NBA}?dates=${fmt(today)}-${fmt(end)}`, {
-      next: { revalidate: 3600 },
-      headers: { 'Accept': 'application/json' },
-    })
-
-    if (!res.ok) throw new Error(`ESPN ${res.status}`)
-
-    const data = await res.json()
-    const events: any[] = data.events || []
-
-    const matches = events.map((e: any) => {
-      const comp = e.competitions?.[0]
-      if (!comp) return null
-
-      const homeComp = comp.competitors?.find((c: any) => c.homeAway === 'home')
-      const awayComp = comp.competitors?.find((c: any) => c.homeAway === 'away')
-      const homeName = homeComp?.team?.displayName || homeComp?.team?.name || 'Local'
-      const awayName = awayComp?.team?.displayName || awayComp?.team?.name || 'Visitante'
-
-      const statusName = comp.status?.type?.name || 'STATUS_SCHEDULED'
-      const status = getStatusKey(statusName)
-
-      const homeStr = getStrength(homeName)
-      const awayStr = getStrength(awayName)
-      const { homeOdd, awayOdd, pHome, pAway } = generateOdds(homeStr, awayStr)
-
-      const isHomeFav = pHome >= pAway
-      const confidence = Math.max(pHome, pAway)
-      const winnerOdd = isHomeFav ? homeOdd : awayOdd
-      const ev = +(confidence * winnerOdd - 1).toFixed(4)
-
-      return {
-        id: e.id,
-        home_team: {
-          name: homeName,
-          logo: homeComp?.team?.logo || null,
-        },
-        away_team: {
-          name: awayName,
-          logo: awayComp?.team?.logo || null,
-        },
-        match_date: e.date,
-        status,
-        league: 'NBA',
-        odds: [
-          { selection: 'home', odd_value: homeOdd },
-          { selection: 'away', odd_value: awayOdd },
-        ],
-        prediction: {
-          predicted_outcome: isHomeFav ? 'home' : 'away',
-          confidence: +confidence.toFixed(4),
-          expected_value: ev > 0 ? ev : 0,
-          bet_type: confidence >= 0.65 ? 'fixed' : 'parlay',
-          suggested_amount_cop:
-            ev > 0.07 ? 45000 :
-            ev > 0.04 ? 28000 :
-            ev > 0.02 ? 15000 : 0,
-        },
-      }
-    }).filter(Boolean)
-
-    return NextResponse.json({ matches, source: 'espn', count: matches.length })
+    // 2. Fall back to ESPN live data
+    const espnMatches = await getMatchesFromESPN()
+    return NextResponse.json({ matches: espnMatches, source: 'espn', count: espnMatches.length })
   } catch (err) {
     console.error('[/api/nba/matches]', err)
-    // Return empty — client will fall back to demo data
     return NextResponse.json({ matches: [] }, { status: 200 })
   }
 }

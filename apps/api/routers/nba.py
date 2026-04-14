@@ -5,9 +5,12 @@ Uses Server-Sent Events (SSE) for real-time scraping logs.
 """
 import asyncio
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import AsyncGenerator
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -134,18 +137,70 @@ async def _run_odds_background(session_id: str):
 
         supabase = get_supabase()
         saved = 0
+        today = datetime.now(timezone.utc).date().isoformat()
+
         for odd in odds_data:
             try:
-                supabase.table("odds").insert({
-                    "bookmaker": odd.get("bookmaker", "rushbet"),
-                    "market":    odd.get("market", "moneyline"),
-                    "selection": odd.get("home_team", ""),
-                    "odd_value": odd.get("ml_home", 2.0),
-                    "scraped_at": datetime.now(timezone.utc).isoformat(),
-                }).execute()
+                home_name = odd.get("home_team", "")
+                away_name = odd.get("away_team", "")
+                match_id = None
+
+                if home_name and away_name:
+                    # Upsert teams (unique constraint now exists on name+sport)
+                    for name in [home_name, away_name]:
+                        supabase.table("teams").upsert(
+                            {"name": name, "sport": "nba", "league": "NBA"},
+                            on_conflict="name,sport"
+                        ).execute()
+
+                    # Get team IDs
+                    home_res = supabase.table("teams").select("id").eq("name", home_name).eq("sport", "nba").execute()
+                    away_res = supabase.table("teams").select("id").eq("name", away_name).eq("sport", "nba").execute()
+
+                    if home_res.data and away_res.data:
+                        home_id = home_res.data[0]["id"]
+                        away_id = away_res.data[0]["id"]
+
+                        # Find existing match
+                        match_res = supabase.table("matches").select("id").eq(
+                            "home_team_id", home_id
+                        ).eq("away_team_id", away_id).eq("sport", "nba").gte(
+                            "match_date", today
+                        ).execute()
+
+                        if match_res.data:
+                            match_id = match_res.data[0]["id"]
+                        else:
+                            # Create match from odds data (no stats scraped yet)
+                            ins = supabase.table("matches").insert({
+                                "sport": "nba",
+                                "league": "NBA",
+                                "season": "2025-26",
+                                "home_team_id": home_id,
+                                "away_team_id": away_id,
+                                "match_date": datetime.now(timezone.utc).isoformat(),
+                                "status": "scheduled",
+                                "scraped_at": datetime.now(timezone.utc).isoformat(),
+                            }).execute()
+                            if ins.data:
+                                match_id = ins.data[0]["id"]
+
+                # Save home & away odds linked to match
+                scraped_at = datetime.now(timezone.utc).isoformat()
+                for selection, odd_key in [("home", "ml_home"), ("away", "ml_away")]:
+                    odd_val = odd.get(odd_key)
+                    if odd_val:
+                        supabase.table("odds").insert({
+                            "match_id":  match_id,
+                            "bookmaker": odd.get("bookmaker", "rushbet"),
+                            "market":    "moneyline",
+                            "selection": selection,
+                            "odd_value": float(odd_val),
+                            "scraped_at": scraped_at,
+                        }).execute()
                 saved += 1
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Error saving odds for {odd.get('home_team')}: {e}")
 
         await queue.put({
             "type": "done",

@@ -1,6 +1,43 @@
 import { NextResponse } from 'next/server'
+import { createClient } from '@supabase/supabase-js'
 
-// ESPN Soccer league keys → display names
+// ── Supabase ─────────────────────────────────────────────────────────────────
+async function getMatchesFromSupabase(): Promise<any[] | null> {
+  try {
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+    const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+    if (!url || !key) return null
+
+    const sb  = createClient(url, key)
+    const now = new Date().toISOString()
+    const end = new Date(Date.now() + 8 * 86_400_000).toISOString()
+
+    const { data: matches, error } = await sb
+      .from('matches')
+      .select('*, home_team:teams!home_team_id(name), away_team:teams!away_team_id(name)')
+      .eq('sport', 'football')
+      .gte('match_date', now)
+      .lte('match_date', end)
+      .order('match_date')
+
+    if (error || !matches || matches.length === 0) return null
+
+    const enriched = await Promise.all(matches.map(async (m: any) => {
+      const [{ data: odds }, { data: preds }] = await Promise.all([
+        sb.from('odds').select('*').eq('match_id', m.id),
+        sb.from('predictions').select('*').eq('match_id', m.id)
+          .order('created_at', { ascending: false }).limit(1),
+      ])
+      return { ...m, odds: odds || [], prediction: preds?.[0] || null }
+    }))
+
+    return enriched
+  } catch {
+    return null
+  }
+}
+
+// ── ESPN Soccer league keys → display names
 const LEAGUES: Array<{ key: string; name: string; slug: string }> = [
   { key: 'uefa.champions',  name: 'Champions League', slug: 'champions-league' },
   { key: 'eng.1',           name: 'Premier League',   slug: 'premier-league'  },
@@ -133,11 +170,16 @@ async function fetchLeague(league: { key: string; name: string; slug: string }):
 
 export async function GET() {
   try {
-    // Fetch all leagues in parallel
+    // 1. Try Supabase (real scraped data)
+    const sbMatches = await getMatchesFromSupabase()
+    if (sbMatches && sbMatches.length > 0) {
+      return NextResponse.json({ matches: sbMatches, source: 'supabase', count: sbMatches.length })
+    }
+
+    // 2. Fall back to ESPN live data
     const results = await Promise.all(LEAGUES.map(fetchLeague))
     const matches = results.flat()
 
-    // Sort by date
     matches.sort((a: any, b: any) =>
       new Date(a.match_date).getTime() - new Date(b.match_date).getTime()
     )
