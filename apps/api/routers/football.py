@@ -77,10 +77,33 @@ async def _run_football_stats_bg(session_id: str, league_key: str):
             except Exception:
                 pass
 
+        # Save team stats to Supabase (stats_json column) so ML model can use real data
+        team_stats = result.get("team_stats", {})
+        stats_saved = 0
+        scraped_ts = datetime.now(timezone.utc).isoformat()
+        for team_name, ts in team_stats.items():
+            try:
+                supabase.table("teams").upsert(
+                    {"name": team_name, "sport": "football", "league": league_key},
+                    on_conflict="name,sport"
+                ).execute()
+                team_res = supabase.table("teams").select("id").eq("name", team_name).eq("sport", "football").execute()
+                if team_res.data:
+                    clean_ts = {k: v for k, v in ts.items() if not k.startswith("_")}
+                    supabase.table("team_stats").insert({
+                        "team_id":   team_res.data[0]["id"],
+                        "stats_json": clean_ts,
+                        "source_url": "sofascore",
+                        "scraped_at": scraped_ts,
+                    }).execute()
+                    stats_saved += 1
+            except Exception:
+                pass
+
         await queue.put({
             "type":    "done",
-            "message": f"✅ {league_key}: {saved} partidos guardados, {len(result.get('team_stats', {}))} equipos",
-            "result":  {"fixtures_count": saved, "teams_count": len(result.get("team_stats", {}))},
+            "message": f"✅ {league_key}: {saved} partidos, {stats_saved} equipos con stats (SofaScore)",
+            "result":  {"fixtures_count": saved, "teams_count": stats_saved},
         })
     except Exception as e:
         if queue:

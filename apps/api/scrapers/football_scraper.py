@@ -492,9 +492,33 @@ async def run_football_stats_scrape(
     league_key: str,
     log_queue: asyncio.Queue,
 ) -> dict:
-    scraper = FbrefFootballScraper()
-    fixtures = await scraper.scrape_upcoming_fixtures(league_key=league_key, log_queue=log_queue)
-    stats    = await scraper.scrape_team_stats(league_key=league_key, log_queue=log_queue)
+    from scrapers.sofascore_scraper import (
+        SofaScoreFootballScraper,
+        get_football_team_stats,
+    )
+
+    # Fixtures: SofaScore → ESPN → fbref
+    sofa = SofaScoreFootballScraper()
+    fixtures = await sofa.scrape_upcoming_fixtures(league_key=league_key, log_queue=log_queue)
+
+    if not fixtures:
+        # ESPN fallback
+        league_cfg = FOOTBALL_LEAGUES.get(league_key, {})
+        fixtures = await _espn_football_fixtures(league_key, league_cfg.get("name", league_key), log_queue)
+
+    if not fixtures:
+        # fbref last resort (almost always blocked on Railway)
+        fbref = FbrefFootballScraper()
+        fixtures = await fbref.scrape_upcoming_fixtures(league_key=league_key, log_queue=log_queue)
+
+    # Stats: SofaScore primary (fbref always blocked on Railway)
+    stats = await get_football_team_stats(league_key=league_key, log_queue=log_queue)
+
+    if not stats:
+        # fbref fallback (will probably fail too, but try)
+        fbref = FbrefFootballScraper()
+        stats = await fbref.scrape_team_stats(league_key=league_key, log_queue=log_queue)
+
     return {"fixtures": fixtures, "team_stats": stats, "league": league_key}
 
 

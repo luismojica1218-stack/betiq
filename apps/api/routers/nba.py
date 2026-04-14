@@ -84,13 +84,32 @@ async def _run_stats_background(session_id: str):
                         }).execute()
 
         team_stats = result.get("team_stats", {})
+        stats_saved = 0
         if team_stats:
-            await queue.put({"type": "log", "message": f"📊 Stats de {len(team_stats)} equipos procesadas"})
+            await queue.put({"type": "log", "message": f"📊 Guardando stats de {len(team_stats)} equipos NBA (SofaScore)..."})
+            scraped_ts = datetime.now(timezone.utc).isoformat()
+            for team_name, ts in team_stats.items():
+                try:
+                    supabase.table("teams").upsert(
+                        {"name": team_name, "sport": "nba", "league": "NBA"},
+                        on_conflict="name,sport"
+                    ).execute()
+                    team_res = supabase.table("teams").select("id").eq("name", team_name).eq("sport", "nba").execute()
+                    if team_res.data:
+                        supabase.table("team_stats").insert({
+                            "team_id":    team_res.data[0]["id"],
+                            "stats_json": ts,
+                            "source_url": "sofascore",
+                            "scraped_at": scraped_ts,
+                        }).execute()
+                        stats_saved += 1
+                except Exception:
+                    pass
 
         await queue.put({
             "type": "done",
-            "message": f"✅ Scraping completado: {len(games)} partidos, {len(team_stats)} equipos",
-            "result": {"games_count": len(games), "teams_count": len(team_stats)},
+            "message": f"✅ Scraping NBA: {len(games)} partidos, {stats_saved} equipos con stats (SofaScore)",
+            "result": {"games_count": len(games), "teams_count": stats_saved},
         })
     except Exception as e:
         if queue:

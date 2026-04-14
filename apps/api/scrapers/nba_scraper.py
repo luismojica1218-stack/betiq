@@ -488,10 +488,30 @@ class RushbetNBAScraper:
 # -------------------- Module-level convenience functions --------------------
 
 async def run_nba_stats_scrape(log_queue: asyncio.Queue) -> dict:
-    """Entry point called by the FastAPI router."""
-    scraper = NBAStatsScraper()
-    games = await scraper.scrape_upcoming_games(days_ahead=7, log_queue=log_queue)
-    stats = await scraper.scrape_team_season_stats(log_queue=log_queue)
+    """Entry point called by the FastAPI router. Uses SofaScore as primary source."""
+    from scrapers.sofascore_scraper import SofaScoreNBAScraper, get_nba_team_stats
+
+    async def log(msg: str):
+        logger.info(msg)
+        await log_queue.put({"type": "log", "message": msg})
+
+    # Games: SofaScore → ESPN → basketball-reference
+    sofa = SofaScoreNBAScraper()
+    games = await sofa.scrape_upcoming_games(days_ahead=10, log_queue=log_queue)
+
+    if not games:
+        await log("🔄 SofaScore vacío — usando ESPN para NBA...")
+        scraper = NBAStatsScraper()
+        games = await scraper.scrape_upcoming_games(days_ahead=7, log_queue=log_queue)
+
+    # Stats: SofaScore primary (basketball-reference blocked on Railway)
+    stats = await get_nba_team_stats(log_queue=log_queue)
+
+    if not stats:
+        await log("🔄 SofaScore stats vacío — intentando basketball-reference...")
+        scraper = NBAStatsScraper()
+        stats = await scraper.scrape_team_season_stats(log_queue=log_queue)
+
     return {"games": games, "team_stats": stats, "count": len(games)}
 
 

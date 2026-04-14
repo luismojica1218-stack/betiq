@@ -377,9 +377,34 @@ async def run_tennis_stats_scrape(
     tour: str,
     log_queue: asyncio.Queue,
 ) -> dict:
-    scraper  = UTSTennisScraper()
-    rankings = await scraper.scrape_rankings(tour=tour, top_n=100, log_queue=log_queue)
-    matches  = await scraper.scrape_upcoming_matches(tour=tour, log_queue=log_queue)
+    """Uses SofaScore as primary source for both matches and rankings."""
+    from scrapers.sofascore_scraper import (
+        SofaScoreTennisScraper,
+        get_tennis_player_ratings,
+    )
+
+    async def log(msg: str):
+        logger.info(msg)
+        await log_queue.put({"type": "log", "message": msg})
+
+    # Matches: SofaScore primary
+    sofa = SofaScoreTennisScraper()
+    matches = await sofa.scrape_upcoming_matches(tour=tour, days_ahead=10, log_queue=log_queue)
+
+    if not matches:
+        await log(f"🔄 SofaScore tenis vacío — intentando ATP/WTA Tour scraper...")
+        uts = UTSTennisScraper()
+        matches = await uts.scrape_upcoming_matches(tour=tour, log_queue=log_queue)
+
+    # Rankings: SofaScore primary (UTS blocked on Railway)
+    rankings = await get_tennis_player_ratings(tour=tour, log_queue=log_queue)
+
+    if not rankings:
+        await log("🔄 SofaScore rankings vacío — intentando UTS...")
+        uts = UTSTennisScraper()
+        rankings_list = await uts.scrape_rankings(tour=tour, top_n=100, log_queue=log_queue)
+        rankings = {r["name"]: r for r in rankings_list if r.get("name")}
+
     return {"rankings": rankings, "matches": matches, "tour": tour}
 
 
