@@ -24,7 +24,7 @@ async function getMatchesFromSupabase(): Promise<any[] | null> {
     if (error || !matches || matches.length === 0) return null
 
     // Batch-fetch team names — avoids the FK join ambiguity that returns null names
-    const teamIds = [...new Set(matches.flatMap((m: any) => [m.home_team_id, m.away_team_id].filter(Boolean)))]
+    const teamIds = Array.from(new Set<string>(matches.flatMap((m: any) => [m.home_team_id, m.away_team_id].filter(Boolean))))
     const { data: teamsData } = await sb.from('teams').select('id, name').in('id', teamIds)
     const teamMap: Record<string, string> = {}
     for (const t of teamsData || []) teamMap[t.id] = t.name
