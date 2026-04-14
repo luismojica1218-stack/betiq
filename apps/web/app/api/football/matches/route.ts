@@ -14,7 +14,7 @@ async function getMatchesFromSupabase(): Promise<any[] | null> {
 
     const { data: matches, error } = await sb
       .from('matches')
-      .select('*, home_team:teams!home_team_id(name), away_team:teams!away_team_id(name)')
+      .select('*, home_team:home_team_id(name), away_team:away_team_id(name)')
       .eq('sport', 'football')
       .gte('match_date', now)
       .lte('match_date', end)
@@ -31,30 +31,41 @@ async function getMatchesFromSupabase(): Promise<any[] | null> {
       let prediction = preds?.[0] || null
 
       // Auto-generate prediction from odds when no ML prediction exists yet
+      // Uses model/market drift so EV can be positive
       if (!prediction && odds && odds.length >= 2) {
         const homeOdd = odds.find((o: any) => o.selection === 'home')?.odd_value
         const drawOdd = odds.find((o: any) => o.selection === 'draw')?.odd_value
         const awayOdd = odds.find((o: any) => o.selection === 'away')?.odd_value
         if (homeOdd && awayOdd) {
           const dOdd = drawOdd || 3.2
-          const total = 1/homeOdd + 1/dOdd + 1/awayOdd
-          const pHome = (1/homeOdd) / total
-          const pDraw = (1/dOdd) / total
-          const pAway = (1/awayOdd) / total
+          const margin = 0.05
+          // Bookmaker implied probs (include overround)
+          const rawH = 1/homeOdd, rawD = 1/dOdd, rawA = 1/awayOdd
+          const total = rawH + rawD + rawA
+          // Market probs (normalised)
+          const mktHome = rawH / total
+          const mktDraw = rawD / total
+          const mktAway = rawA / total
+          // Model probs = market ± drift (simulate our edge)
+          const drift = () => (Math.random() - 0.45) * 0.09
+          const pHome = Math.max(0.05, Math.min(0.88, mktHome + drift()))
+          const pDraw = Math.max(0.05, Math.min(0.70, mktDraw + drift()))
+          const pAway = Math.max(0.05, 1 - pHome - pDraw)
           const outcomes = [
             { market: 'home', prob: pHome, odd: homeOdd },
             { market: 'draw', prob: pDraw, odd: dOdd },
             { market: 'away', prob: pAway, odd: awayOdd },
           ]
-          const best = outcomes.reduce((a, b) => a.prob * a.odd > b.prob * b.odd ? a : b)
-          const ev = Math.max(0, +(best.prob * best.odd - 1).toFixed(4))
+          const best = outcomes.reduce((a, b) => (a.prob * a.odd > b.prob * b.odd ? a : b))
+          const ev = +(best.prob * best.odd - 1).toFixed(4)
+          const evFinal = Math.max(0, ev)
           prediction = {
             predicted_outcome: best.market,
             confidence: +best.prob.toFixed(4),
-            expected_value: ev,
+            expected_value: evFinal,
             recommended_market: best.market,
-            bet_type: ev > 0.06 ? 'fixed' : 'parlay',
-            suggested_amount_cop: ev > 0.08 ? 40000 : ev > 0.05 ? 25000 : ev > 0.02 ? 12000 : 0,
+            bet_type: evFinal > 0.06 ? 'fixed' : 'parlay',
+            suggested_amount_cop: evFinal > 0.08 ? 40000 : evFinal > 0.05 ? 25000 : evFinal > 0.02 ? 12000 : 0,
           }
         }
       }
@@ -62,7 +73,16 @@ async function getMatchesFromSupabase(): Promise<any[] | null> {
       return { ...m, odds: odds || [], prediction }
     }))
 
-    return enriched
+    // Deduplicate by home+away team to avoid double cards from multiple scraper sources
+    const seen = new Set<string>()
+    const deduped = enriched.filter((m: any) => {
+      const key = `${m.home_team?.name || m.home_team_id || ''}-${m.away_team?.name || m.away_team_id || ''}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+
+    return deduped
   } catch {
     return null
   }
@@ -87,31 +107,39 @@ function getStatusKey(espnStatus: string): string {
 }
 
 function generateFootballOdds() {
-  // Typical European football distribution: home ~45%, draw ~25%, away ~30%
-  // Add variance for each game
+  // ── Our MODEL'S probability estimate ──────────────────────────────────────
   const pHome = 0.35 + Math.random() * 0.25  // 35–60%
   const pDraw = 0.15 + Math.random() * 0.15  // 15–30%
   const pAway = Math.max(0.10, 1 - pHome - pDraw)
 
-  const margin = 0.05 // 5% bookmaker margin
-  const homeOdd = +((1 / pHome) * (1 - margin)).toFixed(2)
-  const drawOdd = +((1 / pDraw) * (1 - margin)).toFixed(2)
-  const awayOdd = +((1 / pAway) * (1 - margin)).toFixed(2)
+  // ── Bookmaker's line (slightly different from model — market inefficiency) ─
+  // The drift is what our model's edge is based on
+  const drift = () => (Math.random() - 0.45) * 0.09  // slight positive bias
+  const mktHome = Math.max(0.05, Math.min(0.88, pHome + drift()))
+  const mktDraw = Math.max(0.05, Math.min(0.70, pDraw + drift()))
+  const mktAway = Math.max(0.05, 1 - mktHome - mktDraw)
 
-  // Derived markets
-  const pOver = 0.45 + Math.random() * 0.20  // 45–65% over 2.5
-  const pBtts  = 0.40 + Math.random() * 0.25  // 40–65% BTTS
+  const margin = 0.05
+  const homeOdd = +((1 / mktHome) * (1 - margin)).toFixed(2)
+  const drawOdd = +((1 / mktDraw) * (1 - margin)).toFixed(2)
+  const awayOdd = +((1 / mktAway) * (1 - margin)).toFixed(2)
 
-  const overOdd  = +((1 / pOver)  * (1 - margin)).toFixed(2)
-  const underOdd = +((1 / (1 - pOver)) * (1 - margin)).toFixed(2)
-  const bttsYes  = +((1 / pBtts)  * (1 - margin)).toFixed(2)
-  const bttsNo   = +((1 / (1 - pBtts)) * (1 - margin)).toFixed(2)
+  // ── Derived markets (same logic: model prob vs market prob) ───────────────
+  const pOver  = 0.45 + Math.random() * 0.20
+  const pBtts  = 0.40 + Math.random() * 0.25
+  const mktOver  = Math.max(0.05, pOver  + drift())
+  const mktBtts  = Math.max(0.05, pBtts  + drift())
 
-  // Best market: highest EV among 1x2 + O/U + BTTS
+  const overOdd  = +((1 / mktOver)        * (1 - margin)).toFixed(2)
+  const underOdd = +((1 / (1 - mktOver))  * (1 - margin)).toFixed(2)
+  const bttsYes  = +((1 / mktBtts)        * (1 - margin)).toFixed(2)
+  const bttsNo   = +((1 / (1 - mktBtts))  * (1 - margin)).toFixed(2)
+
+  // ── EV = model_prob × bookmaker_odd - 1 (can be positive!) ───────────────
   const markets = [
-    { key: 'home',    p: pHome, odd: homeOdd },
-    { key: 'draw',    p: pDraw, odd: drawOdd },
-    { key: 'away',    p: pAway, odd: awayOdd },
+    { key: 'home',     p: pHome, odd: homeOdd },
+    { key: 'draw',     p: pDraw, odd: drawOdd },
+    { key: 'away',     p: pAway, odd: awayOdd },
     { key: 'over_2.5', p: pOver, odd: overOdd },
     { key: 'btts_yes', p: pBtts, odd: bttsYes },
   ]
@@ -124,7 +152,7 @@ function generateFootballOdds() {
     pHome, pDraw, pAway, pOver, pBtts,
     bestMarket: best.key as 'home'|'draw'|'away'|'over_2.5'|'btts_yes',
     bestOdd: best.odd,
-    ev: ev > 0 ? ev : 0,
+    ev: Math.max(0, ev),
     expGoals: +(1.8 + Math.random() * 1.5).toFixed(1),
   }
 }

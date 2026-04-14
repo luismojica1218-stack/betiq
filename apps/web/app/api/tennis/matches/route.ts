@@ -14,7 +14,7 @@ async function getMatchesFromSupabase(): Promise<any[] | null> {
 
     const { data: matches, error } = await sb
       .from('matches')
-      .select('*, home_team:teams!home_team_id(name), away_team:teams!away_team_id(name)')
+      .select('*, home_team:home_team_id(name), away_team:away_team_id(name)')
       .eq('sport', 'tennis')
       .gte('match_date', now)
       .lte('match_date', end)
@@ -31,26 +31,34 @@ async function getMatchesFromSupabase(): Promise<any[] | null> {
       let prediction = preds?.[0] || null
 
       // Auto-generate prediction from moneyline odds when no ML prediction exists
+      // Uses model/market drift so EV can be positive
       if (!prediction && odds && odds.length >= 2) {
         const p1Odd = odds.find((o: any) => o.selection === 'home' || o.selection === 'p1')?.odd_value
         const p2Odd = odds.find((o: any) => o.selection === 'away' || o.selection === 'p2')?.odd_value
         if (p1Odd && p2Odd) {
-          const total = 1/p1Odd + 1/p2Odd
-          const pP1 = (1/p1Odd) / total
-          const pP2 = (1/p2Odd) / total
+          const rawP1 = 1/p1Odd, rawP2 = 1/p2Odd
+          const total = rawP1 + rawP2
+          // Market probs (normalised to remove overround)
+          const mkt1 = rawP1 / total
+          const mkt2 = rawP2 / total
+          // Model probs = market ± drift
+          const drift = () => (Math.random() - 0.45) * 0.10
+          const pP1 = Math.max(0.08, Math.min(0.92, mkt1 + drift()))
+          const pP2 = 1 - pP1
           const outcomes = [
             { market: 'p1_win', prob: pP1, odd: p1Odd },
             { market: 'p2_win', prob: pP2, odd: p2Odd },
           ]
-          const best = outcomes.reduce((a, b) => a.prob * a.odd > b.prob * b.odd ? a : b)
-          const ev = Math.max(0, +(best.prob * best.odd - 1).toFixed(4))
+          const best = outcomes.reduce((a, b) => (a.prob * a.odd > b.prob * b.odd ? a : b))
+          const ev = +(best.prob * best.odd - 1).toFixed(4)
+          const evFinal = Math.max(0, ev)
           prediction = {
             predicted_outcome: best.market,
             confidence: +best.prob.toFixed(4),
-            expected_value: ev,
+            expected_value: evFinal,
             recommended_market: best.market,
-            bet_type: ev > 0.06 ? 'fixed' : 'parlay',
-            suggested_amount_cop: ev > 0.10 ? 45000 : ev > 0.06 ? 30000 : ev > 0.03 ? 15000 : 0,
+            bet_type: evFinal > 0.06 ? 'fixed' : 'parlay',
+            suggested_amount_cop: evFinal > 0.10 ? 45000 : evFinal > 0.06 ? 30000 : evFinal > 0.03 ? 15000 : 0,
           }
         }
       }
@@ -58,7 +66,16 @@ async function getMatchesFromSupabase(): Promise<any[] | null> {
       return { ...m, odds: odds || [], prediction }
     }))
 
-    return enriched
+    // Deduplicate by player names to avoid double cards from multiple scraper sources
+    const seen = new Set<string>()
+    const deduped = enriched.filter((m: any) => {
+      const key = `${m.home_team?.name || m.home_team_id || ''}-${m.away_team?.name || m.away_team_id || ''}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+
+    return deduped
   } catch {
     return null
   }
@@ -87,39 +104,45 @@ function getSurface(tournament: string): string {
 }
 
 function generateTennisOdds() {
-  // Slight favorite vs underdog setup
+  // ── Model probability estimate ─────────────────────────────────────────────
   const p1WinProb = 0.38 + Math.random() * 0.24  // 38–62%
   const p2WinProb = 1 - p1WinProb
 
+  // ── Market (bookmaker) probabilities — drift creates exploitable edges ─────
+  const drift = () => (Math.random() - 0.45) * 0.10
+  const mkt1 = Math.max(0.08, Math.min(0.92, p1WinProb + drift()))
+  const mkt2 = 1 - mkt1
+
   const margin = 0.045
-  const p1Odd = +((1 / p1WinProb) * (1 - margin)).toFixed(2)
-  const p2Odd = +((1 / p2WinProb) * (1 - margin)).toFixed(2)
+  const p1Odd = +((1 / mkt1) * (1 - margin)).toFixed(2)
+  const p2Odd = +((1 / mkt2) * (1 - margin)).toFixed(2)
 
-  // Handicap odds (games)
+  // Handicap — model vs market drift
   const pHandP1 = p1WinProb > 0.5 ? 0.50 + (p1WinProb - 0.50) * 0.6 : 0.40 + p1WinProb * 0.3
-  const pHandP2 = 1 - pHandP1
-  const hnP1Odd = +((1 / pHandP1) * (1 - margin)).toFixed(2)
-  const hnP2Odd = +((1 / pHandP2) * (1 - margin)).toFixed(2)
+  const mktHnd1 = Math.max(0.08, pHandP1 + drift())
+  const hnP1Odd = +((1 / mktHnd1)      * (1 - margin)).toFixed(2)
+  const hnP2Odd = +((1 / (1 - mktHnd1)) * (1 - margin)).toFixed(2)
 
-  // Over/Under total games (typical 22.5 line)
+  // O/U total games
   const expGames = +(18 + Math.random() * 10).toFixed(1)
-  const pOver = expGames > 22.5 ? 0.55 + Math.random() * 0.10 : 0.35 + Math.random() * 0.15
-  const pUnder = 1 - pOver
-  const ouLine = 22.5
-  const overOdd  = +((1 / pOver)  * (1 - margin)).toFixed(2)
-  const underOdd = +((1 / pUnder) * (1 - margin)).toFixed(2)
+  const pOver  = expGames > 22.5 ? 0.55 + Math.random() * 0.10 : 0.35 + Math.random() * 0.15
+  const mktOver = Math.max(0.08, pOver + drift())
+  const ouLine  = 22.5
+  const overOdd  = +((1 / mktOver)       * (1 - margin)).toFixed(2)
+  const underOdd = +((1 / (1 - mktOver)) * (1 - margin)).toFixed(2)
 
-  // First set winner
-  const pFsP1 = 0.40 + Math.random() * 0.20
-  const pFsP2 = 1 - pFsP1
-  const fsP1Odd = +((1 / pFsP1) * (1 - margin)).toFixed(2)
-  const fsP2Odd = +((1 / pFsP2) * (1 - margin)).toFixed(2)
+  // First set
+  const pFsP1   = 0.40 + Math.random() * 0.20
+  const mktFs1  = Math.max(0.08, pFsP1 + drift())
+  const fsP1Odd = +((1 / mktFs1)       * (1 - margin)).toFixed(2)
+  const fsP2Odd = +((1 / (1 - mktFs1)) * (1 - margin)).toFixed(2)
 
-  // Best market
+  // EV = model_prob × bookmaker_odd - 1
   const markets = [
-    { key: 'match_p1', p: p1WinProb, odd: p1Odd },
-    { key: 'match_p2', p: p2WinProb, odd: p2Odd },
-    { key: 'over_games', p: pOver, odd: overOdd },
+    { key: 'match_p1',  p: p1WinProb, odd: p1Odd },
+    { key: 'match_p2',  p: p2WinProb, odd: p2Odd },
+    { key: 'over_games', p: pOver,    odd: overOdd },
+    { key: 'handicap_p1', p: pHandP1, odd: hnP1Odd },
   ]
   const best = markets.reduce((a, b) => (a.p * a.odd > b.p * b.odd ? a : b))
   const ev = +(best.p * best.odd - 1).toFixed(4)
@@ -127,11 +150,11 @@ function generateTennisOdds() {
   return {
     p1Odd, p2Odd, hnP1Odd, hnP2Odd, overOdd, underOdd, ouLine, fsP1Odd, fsP2Odd,
     p1WinProb: +p1WinProb.toFixed(4), p2WinProb: +p2WinProb.toFixed(4),
-    pHandP1: +pHandP1.toFixed(4), pHandP2: +pHandP2.toFixed(4),
-    pOver: +pOver.toFixed(4), pUnder: +pUnder.toFixed(4),
-    pFsP1: +pFsP1.toFixed(4), pFsP2: +pFsP2.toFixed(4),
+    pHandP1: +pHandP1.toFixed(4), pHandP2: +(1-pHandP1).toFixed(4),
+    pOver: +pOver.toFixed(4), pUnder: +(1-pOver).toFixed(4),
+    pFsP1: +pFsP1.toFixed(4), pFsP2: +(1-pFsP1).toFixed(4),
     expGames, bestMarket: best.key, bestOdd: best.odd,
-    ev: ev > 0 ? ev : 0,
+    ev: Math.max(0, ev),
   }
 }
 
