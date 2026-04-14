@@ -226,8 +226,32 @@ class UTSTennisScraper:
             })
 
         if not matches:
-            matches = self._demo_upcoming_matches(days_ahead)
-            await log("ℹ️ Usando fixtures de demostración (HTML sin estructura esperada)")
+            # Try SofaScore before falling back to demo data
+            await log(f"🔄 ATP Tour sin datos — probando SofaScore {tour}...")
+            try:
+                from scrapers.sofascore_scraper import run_sofascore_tennis
+                sofa_matches = await run_sofascore_tennis(tour, log_queue)
+                if sofa_matches:
+                    # Map SofaScore format to expected format
+                    matches = [{
+                        "player1":    m["player1"],
+                        "player2":    m["player2"],
+                        "match_date": m["match_date"],
+                        "tour":       m.get("tour", tour),
+                        "tournament": m.get("tournament", "ATP Tour"),
+                        "round":      m.get("round", ""),
+                        "surface":    m.get("surface", "hard"),
+                        "sport":      "tennis",
+                        "status":     "scheduled",
+                    } for m in sofa_matches]
+                    await log(f"✅ SofaScore: {len(matches)} partidos de tenis")
+                else:
+                    matches = self._demo_upcoming_matches(days_ahead)
+                    await log("ℹ️ Usando fixtures de demostración (HTML sin estructura esperada)")
+            except Exception as e:
+                logger.warning(f"SofaScore tennis fallback failed: {e}")
+                matches = self._demo_upcoming_matches(days_ahead)
+                await log("ℹ️ Usando fixtures de demostración (HTML sin estructura esperada)")
 
         await log(f"✅ {len(matches)} partidos de tenis encontrados")
         return matches

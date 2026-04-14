@@ -75,7 +75,11 @@ async def _espn_football_fixtures(
     if not espn_key:
         return []
 
-    url = f"{ESPN_BASE}/{espn_key}/scoreboard"
+    # Use a 10-day date range so we catch upcoming fixtures even on non-game days
+    today_dt = datetime.now(timezone.utc)
+    end_dt   = today_dt + timedelta(days=10)
+    date_range = f"{today_dt.strftime('%Y%m%d')}-{end_dt.strftime('%Y%m%d')}"
+    url = f"{ESPN_BASE}/{espn_key}/scoreboard?dates={date_range}"
     await log(f"🔄 Usando ESPN como fuente alternativa para {league_name}...")
 
     try:
@@ -174,7 +178,13 @@ class FbrefFootballScraper:
             html = await _fetch_html(client, url)
             if not html:
                 await log(f"⚠️ No se pudo conectar con fbref para {league_cfg['name']}")
-                return await _espn_football_fixtures(league_key, league_cfg["name"], log_queue)
+                # Try ESPN first, then SofaScore as second fallback
+                espn_fixtures = await _espn_football_fixtures(league_key, league_cfg["name"], log_queue)
+                if espn_fixtures:
+                    return espn_fixtures
+                await log(f"🔄 ESPN vacío — usando SofaScore para {league_cfg['name']}...")
+                from scrapers.sofascore_scraper import run_sofascore_football
+                return await run_sofascore_football(league_key, log_queue)
 
         soup = BeautifulSoup(html, "lxml")
         table = soup.find("table", {"id": lambda x: x and "sched_" in x})

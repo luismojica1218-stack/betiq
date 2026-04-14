@@ -66,48 +66,88 @@ class NBAStatsScraper:
 
         await log("🏀 NBA Scraper: iniciando búsqueda de partidos próximos...")
 
-        async with httpx.AsyncClient() as client:
-            for day_offset in range(days_ahead):
-                target_date = today + timedelta(days=day_offset)
-                year  = target_date.strftime("%Y")
-                month = target_date.strftime("%m")
-                day   = target_date.strftime("%d")
-                url   = f"{self.base_url}/friv/dailyleaders.fcgi?month={month}&day={day}&year={year}"
+        # ── Primary source: ESPN NBA API (no auth, reliable from Railway) ────────
+        games = await self._scrape_espn(days_ahead, log)
 
-                await log(f"📅 Buscando partidos para {target_date.strftime('%Y-%m-%d')}...")
-                html = await _fetch_html(client, url)
-                if not html:
-                    await log(f"⚠️ No se pudo obtener datos para {target_date.strftime('%Y-%m-%d')}")
-                    continue
-
-                soup = BeautifulSoup(html, "lxml")
-
-                # Look for game links in the page
-                game_links = soup.select("a[href*='/boxscores/']")
-                seen = set()
-                for link in game_links:
-                    href = link.get("href", "")
-                    if href not in seen and "/boxscores/" in href:
-                        seen.add(href)
-                        # Parse team names from surrounding context
-                        row = link.find_parent("tr")
-                        if row:
-                            cells = row.find_all("td")
-                            if len(cells) >= 2:
-                                games.append({
-                                    "match_date": target_date.isoformat(),
-                                    "status": "scheduled",
-                                    "sport": "nba",
-                                    "league": "NBA",
-                                    "season": "2025-26",
-                                    "source_url": f"{self.base_url}{href}",
-                                })
-
-        # Fallback: scrape from schedule page directly
+        # ── Fallback: basketball-reference monthly calendar ───────────────────────
         if not games:
             games = await self._scrape_schedule_page(log)
 
         await log(f"✅ Encontrados {len(games)} partidos próximos de NBA")
+        return games
+
+    async def _scrape_espn(self, days_ahead: int, log) -> list[dict]:
+        """Primary source: ESPN NBA scoreboard API with date range. Free, no auth, works from Railway."""
+        games = []
+        today = datetime.now(timezone.utc)
+        end   = today + timedelta(days=days_ahead)
+        date_range = f"{today.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}"
+        url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates={date_range}"
+
+        await log(f"📅 ESPN NBA: buscando partidos del {today.strftime('%Y-%m-%d')} al {end.strftime('%Y-%m-%d')}...")
+
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.get(url, headers={"Accept": "application/json"}, timeout=20.0)
+                if not r.is_success:
+                    await log(f"⚠️ ESPN NBA devolvió status {r.status_code}")
+                    return games
+                data = r.json()
+        except Exception as e:
+            await log(f"⚠️ ESPN NBA error: {e}")
+            return games
+
+        # ESPN team abbreviation → full name map for common NBA teams
+        ESPN_TEAMS: dict[str, str] = {
+            "BOS": "Boston Celtics", "LAL": "Los Angeles Lakers", "GSW": "Golden State Warriors",
+            "MIA": "Miami Heat", "PHX": "Phoenix Suns", "MIL": "Milwaukee Bucks",
+            "DEN": "Denver Nuggets", "PHI": "Philadelphia 76ers", "BKN": "Brooklyn Nets",
+            "CHI": "Chicago Bulls", "DFW": "Dallas Mavericks", "DAL": "Dallas Mavericks",
+            "MEM": "Memphis Grizzlies", "MIN": "Minnesota Timberwolves", "NOP": "New Orleans Pelicans",
+            "SAC": "Sacramento Kings", "CLE": "Cleveland Cavaliers", "ATL": "Atlanta Hawks",
+            "TOR": "Toronto Raptors", "NYK": "New York Knicks", "IND": "Indiana Pacers",
+            "OKC": "Oklahoma City Thunder", "POR": "Portland Trail Blazers", "UTA": "Utah Jazz",
+            "SAS": "San Antonio Spurs", "WAS": "Washington Wizards", "ORL": "Orlando Magic",
+            "CHA": "Charlotte Hornets", "HOU": "Houston Rockets", "DET": "Detroit Pistons",
+        }
+
+        for event in data.get("events", []):
+            comp = event.get("competitions", [{}])[0]
+            competitors = comp.get("competitors", [])
+            home = next((c for c in competitors if c.get("homeAway") == "home"), None)
+            away = next((c for c in competitors if c.get("homeAway") == "away"), None)
+            if not (home and away):
+                continue
+
+            home_abbr = home.get("team", {}).get("abbreviation", "")
+            away_abbr = away.get("team", {}).get("abbreviation", "")
+            home_name = home.get("team", {}).get("displayName") or ESPN_TEAMS.get(home_abbr, home_abbr)
+            away_name = away.get("team", {}).get("displayName") or ESPN_TEAMS.get(away_abbr, away_abbr)
+            date_str  = event.get("date", "")
+            status_type = comp.get("status", {}).get("type", {}).get("name", "")
+
+            if "FINAL" in status_type or "POST" in status_type:
+                continue
+            if not (home_name and away_name and date_str):
+                continue
+
+            try:
+                match_dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+
+            games.append({
+                "home_team":  home_name,
+                "away_team":  away_name,
+                "match_date": match_dt.isoformat(),
+                "status":     "scheduled",
+                "sport":      "nba",
+                "league":     "NBA",
+                "season":     "2025-26",
+                "source":     "espn",
+            })
+
+        await log(f"✅ ESPN NBA: {len(games)} partidos encontrados")
         return games
 
     async def _scrape_schedule_page(self, log) -> list[dict]:
