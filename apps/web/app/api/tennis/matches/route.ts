@@ -14,7 +14,7 @@ async function getMatchesFromSupabase(): Promise<any[] | null> {
 
     const { data: matches, error } = await sb
       .from('matches')
-      .select('*, home_team:home_team_id(name), away_team:away_team_id(name)')
+      .select('*, home_team:teams!home_team_id(name), away_team:teams!away_team_id(name)')
       .eq('sport', 'tennis')
       .gte('match_date', now)
       .lte('match_date', end)

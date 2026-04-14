@@ -14,7 +14,7 @@ async function getMatchesFromSupabase(): Promise<any[] | null> {
 
     const { data: matches, error } = await sb
       .from('matches')
-      .select('*, home_team:home_team_id(name), away_team:away_team_id(name)')
+      .select('*, home_team:teams!home_team_id(name), away_team:teams!away_team_id(name)')
       .eq('sport', 'nba')
       .gte('match_date', now)
       .lte('match_date', end)
@@ -30,32 +30,46 @@ async function getMatchesFromSupabase(): Promise<any[] | null> {
       ])
       let prediction = preds?.[0] || null
 
-      // Auto-generate prediction from odds when no ML prediction exists
+      // Auto-generate prediction from odds (or team strength if no DB odds)
       // Uses model/market drift so EV can be positive
-      if (!prediction && odds && odds.length >= 2) {
-        const homeOdd = odds.find((o: any) => o.selection === 'home')?.odd_value
-        const awayOdd = odds.find((o: any) => o.selection === 'away')?.odd_value
-        if (homeOdd && awayOdd) {
-          const rawH = 1/homeOdd, rawA = 1/awayOdd
-          const total = rawH + rawA
-          const mktHome = rawH / total
-          const mktAway = rawA / total
-          const drift = (Math.random() - 0.45) * 0.10
-          const pHome = Math.max(0.08, Math.min(0.92, mktHome + drift))
-          const pAway = 1 - pHome
-          const evHome = +(pHome * homeOdd - 1).toFixed(4)
-          const evAway = +(pAway * awayOdd - 1).toFixed(4)
-          const best = evHome >= evAway
-            ? { market: 'home', prob: pHome, odd: homeOdd, ev: evHome }
-            : { market: 'away', prob: pAway, odd: awayOdd, ev: evAway }
-          const evFinal = Math.max(0, best.ev)
-          prediction = {
-            predicted_outcome: best.market,
-            confidence: +best.prob.toFixed(4),
-            expected_value: evFinal,
-            bet_type: evFinal > 0.06 ? 'fixed' : 'parlay',
-            suggested_amount_cop: evFinal > 0.07 ? 45000 : evFinal > 0.04 ? 28000 : evFinal > 0.02 ? 15000 : 0,
-          }
+      if (!prediction) {
+        let homeOdd = odds?.find((o: any) => o.selection === 'home')?.odd_value
+        let awayOdd = odds?.find((o: any) => o.selection === 'away')?.odd_value
+
+        // If no odds in DB, generate from team strength lookup
+        if (!homeOdd || !awayOdd) {
+          const homeName = m.home_team?.name || ''
+          const awayName = m.away_team?.name  || ''
+          const generated = generateOdds(getStrength(homeName), getStrength(awayName))
+          homeOdd = generated.homeOdd
+          awayOdd = generated.awayOdd
+        }
+
+        const rawH = 1/homeOdd, rawA = 1/awayOdd
+        const total = rawH + rawA
+        const mktHome = rawH / total
+        const drift = (Math.random() - 0.45) * 0.10
+        const pHome = Math.max(0.08, Math.min(0.92, mktHome + drift))
+        const pAway = 1 - pHome
+        const evHome = +(pHome * homeOdd - 1).toFixed(4)
+        const evAway = +(pAway * awayOdd - 1).toFixed(4)
+        const best = evHome >= evAway
+          ? { market: 'home', prob: pHome, odd: homeOdd, ev: evHome }
+          : { market: 'away', prob: pAway, odd: awayOdd, ev: evAway }
+        const evFinal = Math.max(0, best.ev)
+        // Only set odds on the match object if they came from strength (so client shows real numbers)
+        if (!odds || odds.length === 0) {
+          m.odds = [
+            { selection: 'home', odd_value: homeOdd },
+            { selection: 'away', odd_value: awayOdd },
+          ]
+        }
+        prediction = {
+          predicted_outcome: best.market,
+          confidence: +best.prob.toFixed(4),
+          expected_value: evFinal,
+          bet_type: evFinal > 0.06 ? 'fixed' : 'parlay',
+          suggested_amount_cop: evFinal > 0.07 ? 45000 : evFinal > 0.04 ? 28000 : evFinal > 0.02 ? 15000 : 0,
         }
       }
 

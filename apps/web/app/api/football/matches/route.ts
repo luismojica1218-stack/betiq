@@ -14,7 +14,7 @@ async function getMatchesFromSupabase(): Promise<any[] | null> {
 
     const { data: matches, error } = await sb
       .from('matches')
-      .select('*, home_team:home_team_id(name), away_team:away_team_id(name)')
+      .select('*, home_team:teams!home_team_id(name), away_team:teams!away_team_id(name)')
       .eq('sport', 'football')
       .gte('match_date', now)
       .lte('match_date', end)
@@ -52,9 +52,9 @@ async function getMatchesFromSupabase(): Promise<any[] | null> {
           const pDraw = Math.max(0.05, Math.min(0.70, mktDraw + drift()))
           const pAway = Math.max(0.05, 1 - pHome - pDraw)
           const outcomes = [
-            { market: 'home', prob: pHome, odd: homeOdd },
-            { market: 'draw', prob: pDraw, odd: dOdd },
-            { market: 'away', prob: pAway, odd: awayOdd },
+            { market: 'home_win', prob: pHome, odd: homeOdd },
+            { market: 'draw',     prob: pDraw, odd: dOdd },
+            { market: 'away_win', prob: pAway, odd: awayOdd },
           ]
           const best = outcomes.reduce((a, b) => (a.prob * a.odd > b.prob * b.odd ? a : b))
           const ev = +(best.prob * best.odd - 1).toFixed(4)
@@ -137,11 +137,11 @@ function generateFootballOdds() {
 
   // ── EV = model_prob × bookmaker_odd - 1 (can be positive!) ───────────────
   const markets = [
-    { key: 'home',     p: pHome, odd: homeOdd },
-    { key: 'draw',     p: pDraw, odd: drawOdd },
-    { key: 'away',     p: pAway, odd: awayOdd },
-    { key: 'over_2.5', p: pOver, odd: overOdd },
-    { key: 'btts_yes', p: pBtts, odd: bttsYes },
+    { key: 'home_win',  p: pHome, odd: homeOdd },
+    { key: 'draw',      p: pDraw, odd: drawOdd },
+    { key: 'away_win',  p: pAway, odd: awayOdd },
+    { key: 'over_2.5',  p: pOver, odd: overOdd },
+    { key: 'btts_yes',  p: pBtts, odd: bttsYes },
   ]
   const best = markets.reduce((a, b) => (a.p * a.odd > b.p * b.odd ? a : b))
   const ev = +(best.p * best.odd - 1).toFixed(4)
@@ -150,7 +150,7 @@ function generateFootballOdds() {
     homeOdd, drawOdd, awayOdd,
     overOdd, underOdd, bttsYes, bttsNo,
     pHome, pDraw, pAway, pOver, pBtts,
-    bestMarket: best.key as 'home'|'draw'|'away'|'over_2.5'|'btts_yes',
+    bestMarket: best.key as 'home_win'|'draw'|'away_win'|'over_2.5'|'btts_yes',
     bestOdd: best.odd,
     ev: Math.max(0, ev),
     expGoals: +(1.8 + Math.random() * 1.5).toFixed(1),
@@ -187,7 +187,7 @@ async function fetchLeague(league: { key: string; name: string; slug: string }):
       const odds = generateFootballOdds()
 
       // Best outcome for prediction
-      const pOutcomes = { home: odds.pHome, draw: odds.pDraw, away: odds.pAway }
+      const pOutcomes = { home_win: odds.pHome, draw: odds.pDraw, away_win: odds.pAway }
       const bestOutcome = (Object.entries(pOutcomes).reduce((a, b) => a[1] > b[1] ? a : b))[0]
       const confidence = Math.max(odds.pHome, odds.pDraw, odds.pAway)
 
