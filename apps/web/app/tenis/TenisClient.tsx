@@ -140,35 +140,65 @@ export default function TenisClient() {
           const data = await res.json()
           if (data.matches && data.matches.length > 0) {
              const mapped = data.matches.map((m: any) => {
-                const pred = m.prediction || {}
-                const p1Odd = m.odds?.find((o: any) => (o.selection || '').toLowerCase().includes('home'))?.odd_value || 1.85
-                const p2Odd = m.odds?.find((o: any) => (o.selection || '').toLowerCase().includes('away'))?.odd_value || 1.95
-                
+                const pred  = m.prediction || {}
+                const odds  = m.odds || []
+                const p1Odd = odds.find((o: any) => o.selection === 'home')?.odd_value || 1.85
+                const p2Odd = odds.find((o: any) => o.selection === 'away')?.odd_value || 1.95
+                const hnP1  = odds.find((o: any) => o.selection === 'handicap_home')?.odd_value || 1.85
+                const hnP2  = odds.find((o: any) => o.selection === 'handicap_away')?.odd_value || 1.95
+                const overO = odds.find((o: any) => o.selection === 'over_games')?.odd_value  || 1.90
+                const underO= odds.find((o: any) => o.selection === 'under_games')?.odd_value || 1.90
+                const fsP1  = odds.find((o: any) => o.selection === 'firstset_home')?.odd_value || 1.85
+                const fsP2  = odds.find((o: any) => o.selection === 'firstset_away')?.odd_value || 1.95
+
+                const p1Win  = pred.p1_win_prob || pred.confidence || 0.50
+                const p2Win  = pred.p2_win_prob || (1 - p1Win)
+                const pHnP1  = pred.p_handicap_p1 || 0.50
+                const pOver  = pred.p_over_games  || 0.50
+                const pFs1   = pred.p_firstset_p1 || 0.50
+                const ev     = pred.expected_value || 0
+
+                // Determine surface from tournament name or server field
+                const surfaceFromServer = (m.surface || '').toLowerCase()
+                const tournName = (m.tournament || m.round || '').toLowerCase()
+                const surface = surfaceFromServer && surfaceFromServer !== 'unknown'
+                  ? surfaceFromServer
+                  : (tournName.includes('clay') || tournName.includes('monte') || tournName.includes('madrid') || tournName.includes('rome') || tournName.includes('roland') || tournName.includes('barcelona'))
+                    ? 'clay'
+                    : (tournName.includes('wimbledon') || tournName.includes('grass') || tournName.includes('queen') || tournName.includes('halle'))
+                      ? 'grass'
+                      : 'hard'
+
                 return {
                   id: m.id,
-                  tour: m.league || 'ATP',
-                  tournament: m.round || 'Tournament',
-                  surface: 'hard', // Fallback
+                  tour: (m.league || 'ATP').toUpperCase().includes('WTA') ? 'WTA' : 'ATP',
+                  tournament: m.tournament || m.round || 'Tournament',
+                  surface,
                   round: m.round || 'Round',
                   date: new Date(m.match_date).toLocaleString('es-CO', {day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'}),
                   player1: m.home_team?.name || 'Player 1',
                   player2: m.away_team?.name || 'Player 2',
-                  odds: { p1: p1Odd, p2: p2Odd },
-                  hnOdds: { p1: 1.85, p2: 1.85 },
-                  ouOdds: { over: 1.90, under: 1.90 },
-                  fsOdds: { p1: 1.85, p2: 1.85 },
+                  odds:   { p1: p1Odd, p2: p2Odd },
+                  hnOdds: { p1: hnP1, p2: hnP2 },
+                  ouOdds: { over: overO, under: underO },
+                  fsOdds: { p1: fsP1, p2: fsP2 },
                   pred: {
-                    p1WinProb: pred.confidence || 0.5,
-                    p2WinProb: 1 - (pred.confidence || 0.5),
-                    pHandicapP1: 0.5, pHandicapP2: 0.5,
-                    pOverGames: 0.5, pUnderGames: 0.5, expTotalGames: 22.5, ouLine: 22.5,
-                    pFirstSetP1: 0.5, pFirstSetP2: 0.5,
+                    p1WinProb:   +p1Win.toFixed(4),
+                    p2WinProb:   +p2Win.toFixed(4),
+                    pHandicapP1: +pHnP1.toFixed(4),
+                    pHandicapP2: +(1 - pHnP1).toFixed(4),
+                    pOverGames:  +pOver.toFixed(4),
+                    pUnderGames: +(1 - pOver).toFixed(4),
+                    expTotalGames: pred.exp_total_games || 22.5,
+                    ouLine:      pred.ou_line || 22.5,
+                    pFirstSetP1: +pFs1.toFixed(4),
+                    pFirstSetP2: +(1 - pFs1).toFixed(4),
                     eloP1: 2000, eloP2: 2000,
-                    bestMarket: pred.recommended_market || 'p1_win',
-                    bestOdd: Math.max(p1Odd, p2Odd),
-                    ev: pred.expected_value || 0,
-                    betType: pred.bet_type || 'fixed',
-                    amount: pred.suggested_amount_cop || 0,
+                    bestMarket:  (pred.recommended_market || pred.best_market || 'p1_win') as BestMarket,
+                    bestOdd:     pred.best_odd || Math.max(p1Odd, p2Odd),
+                    ev,
+                    betType:     (pred.bet_type || 'fixed') as 'fixed' | 'parlay',
+                    amount:      pred.suggested_amount_cop || 0,
                   }
                 }
              })

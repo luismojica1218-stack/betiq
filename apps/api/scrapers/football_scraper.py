@@ -174,17 +174,25 @@ class FbrefFootballScraper:
         today = datetime.now(timezone.utc)
         limit = today + timedelta(days=days_ahead)
 
+        # ── SofaScore FIRST (fbref always blocked on Railway) ─────────────────
+        await log(f"🔄 Usando SofaScore como fuente principal para {league_cfg['name']}...")
+        from scrapers.sofascore_scraper import run_sofascore_football
+        sofa_fixtures = await run_sofascore_football(league_key, log_queue)
+        if sofa_fixtures:
+            return sofa_fixtures
+
+        # ── ESPN fallback ──────────────────────────────────────────────────────
+        await log(f"🔄 SofaScore vacío — usando ESPN para {league_cfg['name']}...")
+        espn_fixtures = await _espn_football_fixtures(league_key, league_cfg["name"], log_queue)
+        if espn_fixtures:
+            return espn_fixtures
+
+        # ── fbref last resort (almost always fails from Railway) ──────────────
         async with httpx.AsyncClient() as client:
             html = await _fetch_html(client, url)
             if not html:
-                await log(f"⚠️ No se pudo conectar con fbref para {league_cfg['name']}")
-                # Try ESPN first, then SofaScore as second fallback
-                espn_fixtures = await _espn_football_fixtures(league_key, league_cfg["name"], log_queue)
-                if espn_fixtures:
-                    return espn_fixtures
-                await log(f"🔄 ESPN vacío — usando SofaScore para {league_cfg['name']}...")
-                from scrapers.sofascore_scraper import run_sofascore_football
-                return await run_sofascore_football(league_key, log_queue)
+                await log(f"⚠️ No se pudo obtener fixtures para {league_cfg['name']}")
+                return []
 
         soup = BeautifulSoup(html, "lxml")
         table = soup.find("table", {"id": lambda x: x and "sched_" in x})

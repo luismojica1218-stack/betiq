@@ -29,25 +29,29 @@ async function getMatchesFromSupabase(): Promise<any[] | null> {
           .order('created_at', { ascending: false }).limit(1),
       ])
       let prediction = preds?.[0] || null
+      // finalOdds: DB odds if available, else generated — kept separate so
+      // it is never overridden by the destructured `odds` variable below
+      let finalOdds: any[] = odds || []
 
-      // Auto-generate prediction from odds (or team strength if no DB odds)
-      // Uses model/market drift so EV can be positive
       if (!prediction) {
-        let homeOdd = odds?.find((o: any) => o.selection === 'home')?.odd_value
-        let awayOdd = odds?.find((o: any) => o.selection === 'away')?.odd_value
+        let homeOdd = finalOdds.find((o: any) => o.selection === 'home')?.odd_value
+        let awayOdd = finalOdds.find((o: any) => o.selection === 'away')?.odd_value
 
-        // If no odds in DB, generate from team strength lookup
+        // No DB odds → generate from NBA team strength lookup with drift
         if (!homeOdd || !awayOdd) {
           const homeName = m.home_team?.name || ''
           const awayName = m.away_team?.name  || ''
-          const generated = generateOdds(getStrength(homeName), getStrength(awayName))
-          homeOdd = generated.homeOdd
-          awayOdd = generated.awayOdd
+          const g = generateOdds(getStrength(homeName), getStrength(awayName))
+          homeOdd = g.homeOdd
+          awayOdd = g.awayOdd
+          finalOdds = [
+            { selection: 'home', odd_value: homeOdd },
+            { selection: 'away', odd_value: awayOdd },
+          ]
         }
 
         const rawH = 1/homeOdd, rawA = 1/awayOdd
-        const total = rawH + rawA
-        const mktHome = rawH / total
+        const mktHome = rawH / (rawH + rawA)
         const drift = (Math.random() - 0.45) * 0.10
         const pHome = Math.max(0.08, Math.min(0.92, mktHome + drift))
         const pAway = 1 - pHome
@@ -57,23 +61,16 @@ async function getMatchesFromSupabase(): Promise<any[] | null> {
           ? { market: 'home', prob: pHome, odd: homeOdd, ev: evHome }
           : { market: 'away', prob: pAway, odd: awayOdd, ev: evAway }
         const evFinal = Math.max(0, best.ev)
-        // Only set odds on the match object if they came from strength (so client shows real numbers)
-        if (!odds || odds.length === 0) {
-          m.odds = [
-            { selection: 'home', odd_value: homeOdd },
-            { selection: 'away', odd_value: awayOdd },
-          ]
-        }
         prediction = {
-          predicted_outcome: best.market,
-          confidence: +best.prob.toFixed(4),
-          expected_value: evFinal,
-          bet_type: evFinal > 0.06 ? 'fixed' : 'parlay',
+          predicted_outcome:    best.market,
+          confidence:           +best.prob.toFixed(4),
+          expected_value:       evFinal,
+          bet_type:             evFinal > 0.06 ? 'fixed' : 'parlay',
           suggested_amount_cop: evFinal > 0.07 ? 45000 : evFinal > 0.04 ? 28000 : evFinal > 0.02 ? 15000 : 0,
         }
       }
 
-      return { ...m, odds: odds || [], prediction }
+      return { ...m, odds: finalOdds, prediction }
     }))
 
     // Deduplicate by team names to avoid double cards from multiple scraper sources
