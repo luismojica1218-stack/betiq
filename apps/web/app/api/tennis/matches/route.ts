@@ -28,7 +28,34 @@ async function getMatchesFromSupabase(): Promise<any[] | null> {
         sb.from('predictions').select('*').eq('match_id', m.id)
           .order('created_at', { ascending: false }).limit(1),
       ])
-      return { ...m, odds: odds || [], prediction: preds?.[0] || null }
+      let prediction = preds?.[0] || null
+
+      // Auto-generate prediction from moneyline odds when no ML prediction exists
+      if (!prediction && odds && odds.length >= 2) {
+        const p1Odd = odds.find((o: any) => o.selection === 'home' || o.selection === 'p1')?.odd_value
+        const p2Odd = odds.find((o: any) => o.selection === 'away' || o.selection === 'p2')?.odd_value
+        if (p1Odd && p2Odd) {
+          const total = 1/p1Odd + 1/p2Odd
+          const pP1 = (1/p1Odd) / total
+          const pP2 = (1/p2Odd) / total
+          const outcomes = [
+            { market: 'p1_win', prob: pP1, odd: p1Odd },
+            { market: 'p2_win', prob: pP2, odd: p2Odd },
+          ]
+          const best = outcomes.reduce((a, b) => a.prob * a.odd > b.prob * b.odd ? a : b)
+          const ev = Math.max(0, +(best.prob * best.odd - 1).toFixed(4))
+          prediction = {
+            predicted_outcome: best.market,
+            confidence: +best.prob.toFixed(4),
+            expected_value: ev,
+            recommended_market: best.market,
+            bet_type: ev > 0.06 ? 'fixed' : 'parlay',
+            suggested_amount_cop: ev > 0.10 ? 45000 : ev > 0.06 ? 30000 : ev > 0.03 ? 15000 : 0,
+          }
+        }
+      }
+
+      return { ...m, odds: odds || [], prediction }
     }))
 
     return enriched
@@ -110,8 +137,15 @@ function generateTennisOdds() {
 
 async function fetchTour(tourInfo: { url: string; tour: string }): Promise<any[]> {
   try {
-    const res = await fetch(tourInfo.url, {
-      next: { revalidate: 3600 },
+    // Use 7-day date range to pick up upcoming tournament fixtures
+    const today = new Date()
+    const end   = new Date(Date.now() + 7 * 86_400_000)
+    const pad   = (n: number) => String(n).padStart(2, '0')
+    const fmt   = (d: Date) => `${d.getUTCFullYear()}${pad(d.getUTCMonth()+1)}${pad(d.getUTCDate())}`
+    const dateRange = `${fmt(today)}-${fmt(end)}`
+    const urlWithDates = `${tourInfo.url}?dates=${dateRange}`
+    const res = await fetch(urlWithDates, {
+      next: { revalidate: 1800 },
       headers: { 'Accept': 'application/json' },
     })
     if (!res.ok) return []

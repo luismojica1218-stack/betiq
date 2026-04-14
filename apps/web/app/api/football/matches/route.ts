@@ -28,7 +28,38 @@ async function getMatchesFromSupabase(): Promise<any[] | null> {
         sb.from('predictions').select('*').eq('match_id', m.id)
           .order('created_at', { ascending: false }).limit(1),
       ])
-      return { ...m, odds: odds || [], prediction: preds?.[0] || null }
+      let prediction = preds?.[0] || null
+
+      // Auto-generate prediction from odds when no ML prediction exists yet
+      if (!prediction && odds && odds.length >= 2) {
+        const homeOdd = odds.find((o: any) => o.selection === 'home')?.odd_value
+        const drawOdd = odds.find((o: any) => o.selection === 'draw')?.odd_value
+        const awayOdd = odds.find((o: any) => o.selection === 'away')?.odd_value
+        if (homeOdd && awayOdd) {
+          const dOdd = drawOdd || 3.2
+          const total = 1/homeOdd + 1/dOdd + 1/awayOdd
+          const pHome = (1/homeOdd) / total
+          const pDraw = (1/dOdd) / total
+          const pAway = (1/awayOdd) / total
+          const outcomes = [
+            { market: 'home', prob: pHome, odd: homeOdd },
+            { market: 'draw', prob: pDraw, odd: dOdd },
+            { market: 'away', prob: pAway, odd: awayOdd },
+          ]
+          const best = outcomes.reduce((a, b) => a.prob * a.odd > b.prob * b.odd ? a : b)
+          const ev = Math.max(0, +(best.prob * best.odd - 1).toFixed(4))
+          prediction = {
+            predicted_outcome: best.market,
+            confidence: +best.prob.toFixed(4),
+            expected_value: ev,
+            recommended_market: best.market,
+            bet_type: ev > 0.06 ? 'fixed' : 'parlay',
+            suggested_amount_cop: ev > 0.08 ? 40000 : ev > 0.05 ? 25000 : ev > 0.02 ? 12000 : 0,
+          }
+        }
+      }
+
+      return { ...m, odds: odds || [], prediction }
     }))
 
     return enriched
@@ -100,9 +131,15 @@ function generateFootballOdds() {
 
 async function fetchLeague(league: { key: string; name: string; slug: string }): Promise<any[]> {
   try {
-    const url = `https://site.api.espn.com/apis/site/v2/sports/soccer/${league.key}/scoreboard`
+    // Build a 7-day date range (e.g. 20260413-20260420) so we catch upcoming fixtures, not just today
+    const today = new Date()
+    const end   = new Date(Date.now() + 7 * 86_400_000)
+    const pad   = (n: number) => String(n).padStart(2, '0')
+    const fmt   = (d: Date) => `${d.getUTCFullYear()}${pad(d.getUTCMonth()+1)}${pad(d.getUTCDate())}`
+    const dateRange = `${fmt(today)}-${fmt(end)}`
+    const url = `https://site.api.espn.com/apis/site/v2/sports/soccer/${league.key}/scoreboard?dates=${dateRange}`
     const res = await fetch(url, {
-      next: { revalidate: 3600 },
+      next: { revalidate: 1800 },
       headers: { 'Accept': 'application/json' },
     })
     if (!res.ok) return []

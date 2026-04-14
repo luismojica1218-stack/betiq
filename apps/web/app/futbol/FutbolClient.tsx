@@ -198,7 +198,8 @@ export default function FutbolClient() {
 
   const filtered = liveMatches.filter(m => {
     if (activeLeague !== 'all' && m.league !== activeLeague) return false
-    if (m.pred.ev * 100 < minEV) return false
+    // Only apply EV filter to matches that actually have a predicted EV (scraped matches without predictions always show)
+    if (m.pred.ev > 0 && m.pred.ev * 100 < minEV) return false
     return true
   })
 

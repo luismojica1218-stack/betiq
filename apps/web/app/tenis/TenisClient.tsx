@@ -187,7 +187,8 @@ export default function TenisClient() {
   const filtered = liveMatches.filter(m => {
     if (activeTour !== 'all' && m.tour !== activeTour) return false
     if (activeSurface !== 'all' && m.surface !== activeSurface) return false
-    if (m.pred.ev * 100 < minEV) return false
+    // Only apply EV filter to matches that actually have a predicted EV
+    if (m.pred.ev > 0 && m.pred.ev * 100 < minEV) return false
     return true
   })
 
