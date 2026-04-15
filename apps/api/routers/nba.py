@@ -72,16 +72,18 @@ async def _run_stats_background(session_id: str):
                     home_id = home_res.data[0]["id"] if home_res.data else None
                     away_id = away_res.data[0]["id"] if away_res.data else None
                     if home_id and away_id:
-                        supabase.table("matches").insert({
-                            "sport": "nba",
-                            "league": "NBA",
-                            "season": game.get("season", "2025-26"),
-                            "home_team_id": home_id,
-                            "away_team_id": away_id,
-                            "match_date": game.get("match_date"),
-                            "status": "scheduled",
-                            "scraped_at": datetime.now(timezone.utc).isoformat(),
-                        }).execute()
+                        existing = supabase.table("matches").select("id").eq("home_team_id", home_id).eq("away_team_id", away_id).eq("match_date", game.get("match_date")).execute()
+                        if not existing.data:
+                            supabase.table("matches").insert({
+                                "sport": "nba",
+                                "league": "NBA",
+                                "season": game.get("season", "2025-26"),
+                                "home_team_id": home_id,
+                                "away_team_id": away_id,
+                                "match_date": game.get("match_date"),
+                                "status": "scheduled",
+                                "scraped_at": datetime.now(timezone.utc).isoformat(),
+                            }).execute()
 
         team_stats = result.get("team_stats", {})
         stats_saved = 0

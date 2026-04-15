@@ -63,17 +63,19 @@ async def _run_football_stats_bg(session_id: str, league_key: str):
                 home_res = supabase.table("teams").select("id").eq("name", home_name).eq("sport", "football").execute()
                 away_res = supabase.table("teams").select("id").eq("name", away_name).eq("sport", "football").execute()
                 if home_res.data and away_res.data:
-                    supabase.table("matches").insert({
-                        "sport":        "football",
-                        "league":       fx.get("league", ""),
-                        "season":       fx.get("season", "2025-26"),
-                        "home_team_id": home_res.data[0]["id"],
-                        "away_team_id": away_res.data[0]["id"],
-                        "match_date":   fx.get("match_date"),
-                        "status":       "scheduled",
-                        "scraped_at":   datetime.now(timezone.utc).isoformat(),
-                    }).execute()
-                    saved += 1
+                    existing = supabase.table("matches").select("id").eq("home_team_id", home_res.data[0]["id"]).eq("away_team_id", away_res.data[0]["id"]).eq("match_date", fx.get("match_date")).execute()
+                    if not existing.data:
+                        supabase.table("matches").insert({
+                            "sport":        "football",
+                            "league":       fx.get("league", ""),
+                            "season":       fx.get("season", "2025-26"),
+                            "home_team_id": home_res.data[0]["id"],
+                            "away_team_id": away_res.data[0]["id"],
+                            "match_date":   fx.get("match_date"),
+                            "status":       "scheduled",
+                            "scraped_at":   datetime.now(timezone.utc).isoformat(),
+                        }).execute()
+                        saved += 1
             except Exception:
                 pass
 

@@ -149,8 +149,7 @@ export default function FutbolClient() {
   useEffect(() => {
     async function fetchMatches() {
       try {
-        const API_URL = process.env.NEXT_PUBLIC_API_URL || ''
-        const res = await fetch(`${API_URL}/api/football/matches`)
+        const res = await fetch(`/api/football/matches`)
         if (res.ok) {
           const data = await res.json()
           if (data.matches && data.matches.length > 0) {

@@ -61,8 +61,7 @@ export default function NBAPage() {
   useEffect(() => {
     async function fetchMatches() {
       try {
-        const API_URL = process.env.NEXT_PUBLIC_API_URL || ''
-        const res = await fetch(`${API_URL}/api/nba/matches`)
+        const res = await fetch(`/api/nba/matches`)
         if (res.ok) {
           const data = await res.json()
           if (data.matches && data.matches.length > 0) {

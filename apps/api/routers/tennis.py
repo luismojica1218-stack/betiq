@@ -66,19 +66,21 @@ async def _run_stats_bg(session_id: str, tour: str):
                 p1r = supabase.table("teams").select("id").eq("name", player1).eq("sport","tennis").execute()
                 p2r = supabase.table("teams").select("id").eq("name", player2).eq("sport","tennis").execute()
                 if p1r.data and p2r.data:
-                    # Use upsert to avoid duplicate key errors on repeated scrapes
-                    supabase.table("matches").insert({
-                        "sport":        "tennis",
-                        "league":       m.get("tour", tour),
-                        "season":       "2026",
-                        "round":        m.get("round", ""),
-                        "home_team_id": p1r.data[0]["id"],
-                        "away_team_id": p2r.data[0]["id"],
-                        "match_date":   match_date,
-                        "status":       "scheduled",
-                        "scraped_at":   datetime.now(timezone.utc).isoformat(),
-                    }).execute()
-                    saved += 1
+                    existing = supabase.table("matches").select("id").eq("home_team_id", p1r.data[0]["id"]).eq("away_team_id", p2r.data[0]["id"]).eq("match_date", match_date).execute()
+                    if not existing.data:
+                        # Use insert after checking to avoid duplicate key errors on repeated scrapes
+                        supabase.table("matches").insert({
+                            "sport":        "tennis",
+                            "league":       m.get("tour", tour),
+                            "season":       "2026",
+                            "round":        m.get("round", ""),
+                            "home_team_id": p1r.data[0]["id"],
+                            "away_team_id": p2r.data[0]["id"],
+                            "match_date":   match_date,
+                            "status":       "scheduled",
+                            "scraped_at":   datetime.now(timezone.utc).isoformat(),
+                        }).execute()
+                        saved += 1
             except Exception as exc:
                 logger.warning(f"Tennis match save error: {exc}")
 
