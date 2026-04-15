@@ -217,18 +217,52 @@ async function getMatchesFromESPN(): Promise<any[]> {
   }).filter(Boolean)
 }
 
+/** Check if Supabase data is usable: needs real team names + non-symmetric odds */
+function isGoodData(matches: any[]): boolean {
+  if (!matches || matches.length === 0) return false
+  const withNames = matches.filter((m: any) => m.home_team?.name && m.away_team?.name)
+  if (withNames.length === 0) return false
+  // Detect symmetric 1.90/1.90 odds (indicates null team names during odds generation)
+  const symmetric = withNames.filter((m: any) => {
+    const ho = m.odds?.find((o: any) => o.selection === 'home')?.odd_value
+    const ao = m.odds?.find((o: any) => o.selection === 'away')?.odd_value
+    return ho && ao && Math.abs(ho - ao) < 0.02
+  })
+  // If >60% are symmetric, data pipeline failed → use ESPN instead
+  return symmetric.length / withNames.length < 0.60
+}
+
 // ── Handler ───────────────────────────────────────────────────────────────────
 export async function GET() {
   try {
-    // 1. Try Supabase (real scraped data)
+    // 1. Try Supabase (real scraped data) with quality gate
     const sbMatches = await getMatchesFromSupabase()
-    if (sbMatches && sbMatches.length > 0) {
-      return NextResponse.json({ matches: sbMatches, source: 'supabase', count: sbMatches.length })
+    if (sbMatches && isGoodData(sbMatches)) {
+      // Extra dedup by team names only (handles clock-drift duplicates from multiple scraper runs)
+      const seen = new Set<string>()
+      const deduped = sbMatches.filter((m: any) => {
+        const key = `${m.home_team?.name || ''}-${m.away_team?.name || ''}`
+        if (!key || key === '-') return false  // skip empty-name matches
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+      if (deduped.length > 0) {
+        return NextResponse.json({ matches: deduped, source: 'supabase', count: deduped.length })
+      }
     }
 
-    // 2. Fall back to ESPN live data
+    // 2. ESPN fallback — always has real team names and varied odds
     const espnMatches = await getMatchesFromESPN()
-    return NextResponse.json({ matches: espnMatches, source: 'espn', count: espnMatches.length })
+    // Dedup ESPN results too (same team pair shouldn't appear twice)
+    const seen = new Set<string>()
+    const espnDeduped = espnMatches.filter((m: any) => {
+      const key = `${m.home_team?.name || ''}-${m.away_team?.name || ''}`
+      if (!key || seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    return NextResponse.json({ matches: espnDeduped, source: 'espn', count: espnDeduped.length })
   } catch (err) {
     console.error('[/api/nba/matches]', err)
     return NextResponse.json({ matches: [] }, { status: 200 })

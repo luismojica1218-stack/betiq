@@ -280,23 +280,56 @@ async function fetchLeague(league: { key: string; name: string; slug: string }):
   }
 }
 
+function isGoodFootballData(matches: any[]): boolean {
+  if (!matches || matches.length === 0) return false
+  const withNames = matches.filter((m: any) => m.home_team?.name && m.away_team?.name)
+  if (withNames.length === 0) return false
+  // Needs at least 1 match with positive EV or varied odds
+  const hasVariedOdds = withNames.some((m: any) => {
+    const homeOdd = m.odds?.find((o: any) => o.selection === 'home')?.odd_value
+    const drawOdd = m.odds?.find((o: any) => o.selection === 'draw')?.odd_value
+    return homeOdd && drawOdd && Math.abs(homeOdd - drawOdd) > 0.10
+  })
+  return hasVariedOdds
+}
+
 export async function GET() {
   try {
-    // 1. Try Supabase (real scraped data)
+    // 1. Try Supabase with quality gate
     const sbMatches = await getMatchesFromSupabase()
-    if (sbMatches && sbMatches.length > 0) {
-      return NextResponse.json({ matches: sbMatches, source: 'supabase', count: sbMatches.length })
+    if (sbMatches && isGoodFootballData(sbMatches)) {
+      // Dedup by team pair only (handles multiple-scraper-run duplicates)
+      const seen = new Set<string>()
+      const deduped = sbMatches.filter((m: any) => {
+        const hn = m.home_team?.name || ''
+        const an = m.away_team?.name || ''
+        if (!hn || !an) return false
+        const key = `${hn}-${an}`
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+      if (deduped.length > 0) {
+        return NextResponse.json({ matches: deduped, source: 'supabase', count: deduped.length })
+      }
     }
 
-    // 2. Fall back to ESPN live data
+    // 2. ESPN fallback — generates varied odds with drift → EV > 0 possible
     const results = await Promise.all(LEAGUES.map(fetchLeague))
     const matches = results.flat()
-
-    matches.sort((a: any, b: any) =>
+    // Dedup ESPN by team pair
+    const seenEspn = new Set<string>()
+    const deduped = matches.filter((m: any) => {
+      const key = `${m.home_team?.name || ''}-${m.away_team?.name || ''}`
+      if (!key || seenEspn.has(key)) return false
+      seenEspn.add(key)
+      return true
+    })
+    deduped.sort((a: any, b: any) =>
       new Date(a.match_date).getTime() - new Date(b.match_date).getTime()
     )
 
-    return NextResponse.json({ matches, source: 'espn', count: matches.length })
+    return NextResponse.json({ matches: deduped, source: 'espn', count: deduped.length })
   } catch (err) {
     console.error('[/api/football/matches]', err)
     return NextResponse.json({ matches: [] }, { status: 200 })
