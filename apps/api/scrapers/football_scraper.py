@@ -433,8 +433,9 @@ class BetplayFootballScraper:
                 )
                 page = await context.new_page()
                 await log(f"🌐 Navegando a {url}...")
-                await page.goto(url, wait_until="networkidle", timeout=35000)
-                await asyncio.sleep(4)
+                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                # Esperamos extra para que carguen los scripts interactivos y cuotas sin forzar "networkidle" que causa Timeouts
+                await asyncio.sleep(6)
 
                 # Accept cookies
                 try:

@@ -67,42 +67,27 @@ export default function ConfirmBetModal({ bet, onClose, onConfirm }: Props) {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) throw new Error('No autenticado')
 
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/bets/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          user_id:       user.id,
-          match_id:      activeBet.matchId !== 'demo' ? activeBet.matchId : null,
-          prediction_id: activeBet.predictionId || null,
-          bet_type:      activeBet.betType,
-          bookmaker,
-          market,
-          selection:     activeBet.selection,
-          odd_at_bet:    odd,
-          amount_cop:    amount,
-        }),
-      })
+      const isDemoMatch = activeBet.matchId === 'demo' || activeBet.matchId.startsWith('nba-') || !(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(activeBet.matchId))
 
-      if (!res.ok) {
-        // Fallback: save directly in Supabase
-        const { data, error: sbErr } = await supabase.from('bets').insert({
-          user_id:    user.id,
-          bet_type:   activeBet.betType,
-          bookmaker,
-          market,
-          selection:  activeBet.selection,
-          odd_at_bet: odd,
-          amount_cop: amount,
-          status:     'pending',
-          bet_week:   new Date().toISOString().split('T')[0],
-        }).select().single()
-        if (sbErr) throw new Error(sbErr.message)
-        onConfirm(data.id)
-      } else {
-        const json = await res.json()
-        onConfirm(json.bet?.id || 'ok')
-      }
+      // Perform direct insert via Supabase replacing python API proxy
+      const { data, error: sbErr } = await supabase.from('bets').insert({
+        user_id:    user.id,
+        match_id:   !isDemoMatch ? activeBet.matchId : null,
+        prediction_id: activeBet.predictionId || null,
+        bet_type:   activeBet.betType,
+        bookmaker,
+        market,
+        selection:  activeBet.selection,
+        odd_at_bet: odd,
+        amount_cop: amount,
+        status:     'pending',
+        bet_week:   new Date().toISOString().split('T')[0],
+      }).select().single()
+      
+      if (sbErr) throw new Error(`[DB Error]: ${sbErr.message}`)
+      onConfirm(data.id)
     } catch (e: unknown) {
+      console.error(e)
       setError(e instanceof Error ? e.message : 'Error al guardar la apuesta')
     } finally {
       setLoading(false)
