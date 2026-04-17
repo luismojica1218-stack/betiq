@@ -338,14 +338,23 @@ class RushbetTennisScraper:
                         text  = await block.inner_text()
                         lines = [l.strip() for l in text.split("\n") if l.strip()]
                         players, odds_vals = [], []
+                        
+                        # Extract players
                         for line in lines:
-                            try:
-                                val = float(line.replace(",", "."))
-                                if 1.01 <= val <= 20:
-                                    odds_vals.append(val)
-                            except ValueError:
-                                if 5 <= len(line) <= 35 and "." not in line:
-                                    players.append(line)
+                            if 5 <= len(line) <= 35 and not any(c.isdigit() for c in line[:3]):
+                                players.append(line)
+
+                        # Extract odds strictly from button tags
+                        btn_texts = await block.evaluate("node => Array.from(node.querySelectorAll('button')).map(b => b.innerText)")
+                        for b_text in btn_texts:
+                            parts = b_text.split()
+                            for p in parts:
+                                try:
+                                    val = float(p.replace(",", "."))
+                                    if 1.01 <= val <= 30.0:
+                                        odds_vals.append(val)
+                                except ValueError:
+                                    pass
 
                         if len(players) >= 2 and len(odds_vals) >= 2:
                             odds_list.append({

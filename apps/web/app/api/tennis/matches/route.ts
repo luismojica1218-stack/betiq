@@ -151,7 +151,10 @@ async function fetchTour(tourUrl: string, tourName: string): Promise<any[]> {
     seen.add(key)
 
     const statusName = comp.status?.type?.name || ''
-    if (statusName.includes('FINAL') || statusName.includes('POST')) continue
+    if (statusName.includes('FINAL') || statusName.includes('POST') || statusName.includes('CANCELED')) continue
+
+    const matchDate = new Date(e.date)
+    if (matchDate.getTime() < Date.now() - 24 * 3600 * 1000) continue
 
     const tournName = e.season?.slug || e.name || 'Tournament'
     const roundName = comp.type?.text || comp.notes?.[0]?.headline || 'Round'

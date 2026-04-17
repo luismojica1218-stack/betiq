@@ -123,7 +123,77 @@ async def _run_odds_bg(session_id: str, source: str):
         return
     try:
         result = await run_tennis_odds_scrape(source, queue)
-        await queue.put({"type": "done", "message": f"✅ {len(result.get('odds', []))} cuotas ({source})", "result": result})
+        odds = result.get("odds", [])
+        supabase = get_supabase()
+        saved = 0
+        scraped_at = datetime.now(timezone.utc).isoformat()
+        
+        from datetime import timedelta
+
+        for odd in odds:
+            try:
+                p1_name = odd.get("player1", "")
+                p2_name = odd.get("player2", "")
+                if not (p1_name and p2_name):
+                    continue
+
+                for pname in [p1_name, p2_name]:
+                    supabase.table("teams").upsert(
+                        {"name": pname, "sport": "tennis"},
+                        on_conflict="name,sport"
+                    ).execute()
+
+                p1r = supabase.table("teams").select("id").eq("name", p1_name).eq("sport", "tennis").execute()
+                p2r = supabase.table("teams").select("id").eq("name", p2_name).eq("sport", "tennis").execute()
+                if not (p1r.data and p2r.data):
+                    continue
+
+                p1_id = p1r.data[0]["id"]
+                p2_id = p2r.data[0]["id"]
+
+                # Find or create match
+                match_r = supabase.table("matches").select("id").eq("home_team_id", p1_id).eq("away_team_id", p2_id).eq("sport", "tennis").gte("match_date", datetime.now(timezone.utc).isoformat()).limit(1).execute()
+                if match_r.data:
+                    match_id = match_r.data[0]["id"]
+                else:
+                    new_match = supabase.table("matches").insert({
+                        "sport":        "tennis",
+                        "league":       "ATP",
+                        "home_team_id": p1_id,
+                        "away_team_id": p2_id,
+                        "match_date":   (datetime.now(timezone.utc) + timedelta(days=2)).isoformat(),
+                        "status":       "scheduled",
+                        "scraped_at":   scraped_at,
+                    }).execute()
+                    if not new_match.data:
+                        continue
+                    match_id = new_match.data[0]["id"]
+
+                markets = [
+                    ("moneyline", "home", odd.get("p1_odd")),
+                    ("moneyline", "away", odd.get("p2_odd")),
+                    ("over_under", "over_games", odd.get("ou_games_odd")),
+                ]
+                for market, selection, odd_val in markets:
+                    if odd_val is not None:
+                        try:
+                            supabase.table("odds").insert({
+                                "match_id":   match_id,
+                                "bookmaker":  source,
+                                "market":     market,
+                                "selection":  selection,
+                                "odd_value":  float(odd_val),
+                                "scraped_at": scraped_at,
+                            }).execute()
+                        except Exception:
+                            pass
+
+                saved += 1
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning(f"Tennis odds save error: {exc}")
+
+        await queue.put({"type": "done", "message": f"✅ {saved} partidos de tenis con cuotas guardados ({source})", "result": {"count": saved}})
     except Exception as e:
         if queue:
             await queue.put({"type": "error", "message": str(e)})

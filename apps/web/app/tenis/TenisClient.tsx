@@ -35,78 +35,6 @@ const SURFACES = [
   { key: 'indoor', label: 'Indoor',bgColor: 'bg-purple-500/20 text-purple-400' },
 ]
 
-// ---- Demo data --------------------------------------------------------------
-const DEMO_MATCHES: Array<{
-  id: string; tour: string; tournament: string; surface: string; round: string; date: string
-  player1: string; player2: string
-  odds: { p1: number; p2: number }
-  hnOdds: { p1: number; p2: number }
-  ouOdds: { over: number; under: number }
-  fsOdds: { p1: number; p2: number }
-  pred: MatchPred
-}> = [
-  {
-    id: 't1', tour: 'ATP', tournament: 'Monte Carlo Masters', surface: 'clay', round: 'SF', date: 'Mañana, 07:30',
-    player1: 'Jannik Sinner', player2: 'Carlos Alcaraz',
-    odds: { p1: 2.10, p2: 1.75 },
-    hnOdds: { p1: 1.50, p2: 2.50 },
-    ouOdds: { over: 1.90, under: 1.90 },
-    fsOdds: { p1: 2.00, p2: 1.80 },
-    pred: {
-      p1WinProb: 0.46, p2WinProb: 0.54, eloP1: 2280, eloP2: 2350,
-      pHandicapP1: 0.65, pHandicapP2: 0.35,
-      pOverGames: 0.62, pUnderGames: 0.38, expTotalGames: 22.5, ouLine: 22.5,
-      pFirstSetP1: 0.48, pFirstSetP2: 0.52,
-      bestMarket: 'over_games', bestOdd: 1.90, ev: 0.178, betType: 'fixed', amount: 45000,
-    },
-  },
-  {
-    id: 't2', tour: 'ATP', tournament: 'Barcelona Open', surface: 'clay', round: 'R16', date: 'Hoy, 09:00',
-    player1: 'Rafael Nadal', player2: 'Stefanos Tsitsipas',
-    odds: { p1: 2.25, p2: 1.65 },
-    hnOdds: { p1: 1.65, p2: 2.20 },
-    ouOdds: { over: 1.85, under: 1.95 },
-    fsOdds: { p1: 2.15, p2: 1.70 },
-    pred: {
-      p1WinProb: 0.48, p2WinProb: 0.52, eloP1: 2150, eloP2: 2200,
-      pHandicapP1: 0.64, pHandicapP2: 0.36,
-      pOverGames: 0.65, pUnderGames: 0.35, expTotalGames: 23.5, ouLine: 22.5,
-      pFirstSetP1: 0.49, pFirstSetP2: 0.51,
-      bestMarket: 'handicap_p1', bestOdd: 1.65, ev: 0.056, betType: 'parlay', amount: 30000,
-    },
-  },
-  {
-    id: 't3', tour: 'WTA', tournament: 'Madrid Open', surface: 'clay', round: 'QF', date: 'Próx. semana',
-    player1: 'Iga Swiatek', player2: 'Aryna Sabalenka',
-    odds: { p1: 1.40, p2: 3.00 },
-    hnOdds: { p1: 1.85, p2: 1.95 },
-    ouOdds: { over: 1.85, under: 1.95 },
-    fsOdds: { p1: 1.50, p2: 2.60 },
-    pred: {
-      p1WinProb: 0.73, p2WinProb: 0.27, eloP1: 2400, eloP2: 2250,
-      pHandicapP1: 0.52, pHandicapP2: 0.48,
-      pOverGames: 0.45, pUnderGames: 0.55, expTotalGames: 19.5, ouLine: 20.5,
-      pFirstSetP1: 0.68, pFirstSetP2: 0.32,
-      bestMarket: 'p1_win', bestOdd: 1.40, ev: 0.022, betType: 'parlay', amount: 0,
-    },
-  },
-  {
-    id: 't4', tour: 'ATP', tournament: 'BMW Open', surface: 'clay', round: 'R16', date: 'Mañana, 11:00',
-    player1: 'Alexander Zverev', player2: 'Holger Rune',
-    odds: { p1: 1.65, p2: 2.25 },
-    hnOdds: { p1: 2.40, p2: 1.55 },
-    ouOdds: { over: 1.90, under: 1.90 },
-    fsOdds: { p1: 1.70, p2: 2.15 },
-    pred: {
-      p1WinProb: 0.64, p2WinProb: 0.36, eloP1: 2200, eloP2: 2100,
-      pHandicapP1: 0.45, pHandicapP2: 0.55,
-      pOverGames: 0.52, pUnderGames: 0.48, expTotalGames: 23.5, ouLine: 22.5,
-      pFirstSetP1: 0.60, pFirstSetP2: 0.40,
-      bestMarket: 'p1_win', bestOdd: 1.65, ev: 0.056, betType: 'parlay', amount: 25000,
-    },
-  },
-]
-
 function MarketBadge({ market }: { market: string }) {
   const map: Record<string, string> = {
     p1_win: '🏆 P1 Gana',
@@ -128,7 +56,7 @@ export default function TenisClient() {
   const [minEV,         setMinEV]         = useState(0)
   const [activeBet,     setActiveBet]     = useState<BetCandidate | null>(null)
   const [confirmed,     setConfirmed]     = useState<Set<string>>(new Set())
-  const [liveMatches,   setLiveMatches]   = useState<typeof DEMO_MATCHES>(DEMO_MATCHES)
+  const [liveMatches,   setLiveMatches]   = useState<any[]>([])
   const [isLoading,     setIsLoading]     = useState(true)
 
   useEffect(() => {
@@ -221,7 +149,7 @@ export default function TenisClient() {
     return true
   })
 
-  function buildBetCandidate(match: typeof DEMO_MATCHES[0]): BetCandidate {
+  function buildBetCandidate(match: any): BetCandidate {
     const p = match.pred
     const selectionMap: Record<string, string> = {
       p1_win: `${match.player1} gana`,

@@ -458,17 +458,23 @@ class RushbetNBAScraper:
                         text = await block.inner_text()
                         lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
 
-                        # Parse team names and odds from text
-                        teams = []
-                        odds_vals = []
+                        # Parse team names
+                        teams, odds_vals = [], []
                         for line in lines:
-                            try:
-                                val = float(line.replace(",", "."))
-                                if 1.01 <= val <= 50.0:
-                                    odds_vals.append(val)
-                            except ValueError:
-                                if len(line) > 3 and not any(c.isdigit() for c in line[:3]):
-                                    teams.append(line)
+                            if len(line) > 3 and not any(c.isdigit() for c in line[:3]):
+                                teams.append(line)
+
+                        # Extract odds strictly from button tags
+                        btn_texts = await block.evaluate("node => Array.from(node.querySelectorAll('button')).map(b => b.innerText)")
+                        for b_text in btn_texts:
+                            parts = b_text.split()
+                            for p in parts:
+                                try:
+                                    val = float(p.replace(",", "."))
+                                    if 1.01 <= val <= 50.0:
+                                        odds_vals.append(val)
+                                except ValueError:
+                                    pass
 
                         if len(teams) >= 2 and len(odds_vals) >= 2:
                             odds_list.append({

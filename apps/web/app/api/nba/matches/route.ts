@@ -1,6 +1,10 @@
 import { NextResponse } from 'next/server'
+import { createClient } from '@supabase/supabase-js'
 
-// ── Constants ─────────────────────────────────────────────────────────────────
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || 'https://placeholder.supabase.co',
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_KEY || 'placeholder'
+)// ── Constants ─────────────────────────────────────────────────────────────────
 const ESPN_NBA_SCOREBOARD = 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard'
 const ESPN_NBA_STANDINGS   = 'https://site.api.espn.com/apis/v2/sports/basketball/nba/standings'
 const MARGIN = 0.045
@@ -56,7 +60,7 @@ async function fetchStandings(): Promise<Record<string, TeamQuality>> {
 }
 
 // ── Model probability + market odds with drift ────────────────────────────────
-function computeMatch(homeQ: TeamQuality, awayQ: TeamQuality) {
+function computeMatch(homeQ: TeamQuality, awayQ: TeamQuality, realOdds?: any[]) {
   // Model probability: blend win rate + pts differential
   const hWR  = Math.max(0.10, Math.min(0.90, homeQ.winRate * 1.05)) // home advantage
   const aWR  = Math.max(0.10, Math.min(0.90, awayQ.winRate))
@@ -67,12 +71,25 @@ function computeMatch(homeQ: TeamQuality, awayQ: TeamQuality) {
   const pAway   = 1 - pHome
 
   // Market probability = model ± drift (simulates bookmaker inefficiency / our edge)
-  const drift   = (Math.random() - 0.45) * 0.12  // bias towards positive EV
-  const mktHome = Math.max(0.08, Math.min(0.92, pHome + drift))
-  const mktAway = 1 - mktHome
+  let homeOdd = 2.0
+  let awayOdd = 2.0
 
-  const homeOdd = +((1 / mktHome) * (1 - MARGIN)).toFixed(2)
-  const awayOdd = +((1 / mktAway) * (1 - MARGIN)).toFixed(2)
+  if (realOdds && realOdds.length >= 2) {
+    const hO = realOdds.find((o: any) => o.selection.toLowerCase() === 'home')?.odd_value
+    const aO = realOdds.find((o: any) => o.selection.toLowerCase() === 'away')?.odd_value
+    if (hO && aO) {
+      homeOdd = hO
+      awayOdd = aO
+    }
+  }
+
+  if (homeOdd === 2.0 && awayOdd === 2.0) {
+    const drift   = (Math.random() - 0.45) * 0.12  // bias towards positive EV
+    const mktHome = Math.max(0.08, Math.min(0.92, pHome + drift))
+    const mktAway = 1 - mktHome
+    homeOdd = +((1 / mktHome) * (1 - MARGIN)).toFixed(2)
+    awayOdd = +((1 / mktAway) * (1 - MARGIN)).toFixed(2)
+  }
 
   const evHome  = +(pHome * homeOdd - 1).toFixed(4)
   const evAway  = +(pAway * awayOdd - 1).toFixed(4)
@@ -105,6 +122,19 @@ export async function GET() {
     const fmt    = (d: Date) => d.toISOString().slice(0, 10).replace(/-/g, '')
     const sbURL  = `${ESPN_NBA_SCOREBOARD}?dates=${fmt(today)}-${fmt(end)}`
 
+    // Supabase query for real odds
+    let dbOdds: Record<string, any[]> = {}
+    if (process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL) {
+      const todayIso = new Date().toISOString().split('T')[0]
+      const { data } = await supabase.from('matches').select('home_team:teams!home_team_id(name), odds(selection, odd_value)').eq('sport', 'nba').gte('match_date', todayIso)
+      if (data) {
+        for (const m of data) {
+          const tName = (m.home_team as any)?.name
+          if (tName) dbOdds[tName] = m.odds as any[]
+        }
+      }
+    }
+
     const [standingsData, scoreboardData] = await Promise.all([
       fetchStandings(),
       espnFetch(sbURL),
@@ -136,7 +166,13 @@ export async function GET() {
 
       const homeQ = findQuality(homeName, standingsData)
       const awayQ = findQuality(awayName, standingsData)
-      const calc  = computeMatch(homeQ, awayQ)
+      
+      let matchOdds = dbOdds[homeName]
+      if (!matchOdds) {
+         const key = Object.keys(dbOdds).find(k => k.includes(homeName.split(' ').pop() || '') || homeName.includes(k.split(' ').pop() || ''))
+         if (key) matchOdds = dbOdds[key]
+      }
+      const calc  = computeMatch(homeQ, awayQ, matchOdds)
 
       matches.push({
         id:         e.id,

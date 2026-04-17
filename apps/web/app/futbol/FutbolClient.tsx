@@ -32,101 +32,6 @@ interface MatchPred {
 // ---- Market tabs -----------------------------------------------------------
 type Market = 'moneyline' | 'over_under' | 'btts'
 
-// ---- Demo data --------------------------------------------------------------
-const DEMO_MATCHES: Array<{
-  id: string; league: string; homeTeam: string; awayTeam: string; date: string
-  odds: { home: number; draw: number; away: number }
-  ouOdds: { over: number; under: number }
-  bttsOdds: { yes: number; no: number }
-  pred: MatchPred
-}> = [
-  {
-    id: 'f1', league: 'champions-league',
-    homeTeam: 'Arsenal', awayTeam: 'Real Madrid',
-    date: 'Hoy, 14:00',
-    odds: { home: 2.30, draw: 3.40, away: 2.85 },
-    ouOdds: { over: 1.85, under: 1.95 },
-    bttsOdds: { yes: 1.72, no: 2.05 },
-    pred: {
-      pHome: 0.42, pDraw: 0.27, pAway: 0.31,
-      pOver: 0.64, pBtts: 0.61,
-      expGoals: 2.9,
-      bestMarket: 'over_2.5' as const, bestOdd: 1.85, ev: 0.092, betType: 'parlay' as const, amount: 30000,
-    },
-  },
-  {
-    id: 'f2', league: 'champions-league',
-    homeTeam: 'Manchester City', awayTeam: 'Inter Milan',
-    date: 'Hoy, 14:00',
-    odds: { home: 1.60, draw: 3.80, away: 5.30 },
-    ouOdds: { over: 1.80, under: 2.00 },
-    bttsOdds: { yes: 1.88, no: 1.85 },
-    pred: {
-      pHome: 0.65, pDraw: 0.22, pAway: 0.13,
-      pOver: 0.59, pBtts: 0.57,
-      expGoals: 2.7,
-      bestMarket: 'home_win' as const, bestOdd: 1.60, ev: 0.040, betType: 'fixed' as const, amount: 35000,
-    },
-  },
-  {
-    id: 'f3', league: 'premier-league',
-    homeTeam: 'Liverpool', awayTeam: 'Chelsea',
-    date: 'Mañana, 09:00',
-    odds: { home: 1.80, draw: 3.60, away: 4.50 },
-    ouOdds: { over: 2.00, under: 1.80 },
-    bttsOdds: { yes: 1.90, no: 1.90 },
-    pred: {
-      pHome: 0.58, pDraw: 0.23, pAway: 0.19,
-      pOver: 0.52, pBtts: 0.53,
-      expGoals: 2.5,
-      bestMarket: 'home_win' as const, bestOdd: 1.80, ev: 0.044, betType: 'fixed' as const, amount: 0,
-    },
-  },
-  {
-    id: 'f4', league: 'libertadores',
-    homeTeam: 'Millonarios', awayTeam: 'Flamengo',
-    date: 'Mañana, 19:00',
-    odds: { home: 3.20, draw: 3.10, away: 2.20 },
-    ouOdds: { over: 2.10, under: 1.70 },
-    bttsOdds: { yes: 1.95, no: 1.80 },
-    pred: {
-      pHome: 0.32, pDraw: 0.28, pAway: 0.40,
-      pOver: 0.45, pBtts: 0.48,
-      expGoals: 2.2,
-      bestMarket: 'under_2.5' as const, bestOdd: 1.70, ev: 0.085, betType: 'parlay' as const, amount: 22000,
-    },
-  },
-  {
-    id: 'f5', league: 'la-liga',
-    homeTeam: 'Atletico Madrid', awayTeam: 'Girona',
-    date: 'Próx. 7 días',
-    odds: { home: 1.95, draw: 3.30, away: 3.80 },
-    ouOdds: { over: 1.90, under: 1.90 },
-    bttsOdds: { yes: 1.80, no: 1.95 },
-    pred: {
-      pHome: 0.54, pDraw: 0.25, pAway: 0.21,
-      pOver: 0.51, pBtts: 0.62,
-      expGoals: 2.5,
-      bestMarket: 'btts_yes' as const, bestOdd: 1.80, ev: 0.052, betType: 'fixed' as const, amount: 15000,
-    },
-  },
-  {
-    id: 'f6', league: 'bundesliga',
-    homeTeam: 'Bayer Leverkusen', awayTeam: 'Bayern München',
-    date: 'Próx. 7 días',
-    odds: { home: 2.40, draw: 3.50, away: 2.70 },
-    ouOdds: { over: 1.65, under: 2.20 },
-    bttsOdds: { yes: 1.60, no: 2.30 },
-    pred: {
-      pHome: 0.44, pDraw: 0.24, pAway: 0.32,
-      pOver: 0.63, pBtts: 0.66,
-      expGoals: 3.1,
-      bestMarket: 'over_2.5' as const, bestOdd: 1.65, ev: 0.040, betType: 'parlay' as const, amount: 28000,
-    },
-  },
-]
-
-
 function MarketBadge({ market }: { market: string }) {
   const map: Record<string, string> = {
     home_win: '🏠 Local', draw: '🤝 Empate', away_win: '✈️ Visitante',
@@ -136,14 +41,13 @@ function MarketBadge({ market }: { market: string }) {
   return <span className="badge badge-orange">{map[market] || market}</span>
 }
 
-
 export default function FutbolClient() {
   const [activeLeague, setActiveLeague] = useState('all')
   const [activeMarket, setActiveMarket] = useState<Market>('moneyline')
   const [minEV,        setMinEV]        = useState(0)
   const [activeBet,    setActiveBet]    = useState<BetCandidate | null>(null)
   const [confirmed,    setConfirmed]    = useState<Set<string>>(new Set())
-  const [liveMatches,  setLiveMatches]  = useState<typeof DEMO_MATCHES>(DEMO_MATCHES)
+  const [liveMatches,  setLiveMatches]  = useState<any[]>([])
   const [isLoading,    setIsLoading]    = useState(true)
 
   useEffect(() => {
@@ -222,7 +126,7 @@ export default function FutbolClient() {
     return true
   })
 
-  function buildBetCandidate(match: typeof DEMO_MATCHES[0]): BetCandidate {
+  function buildBetCandidate(match: any): BetCandidate {
     const p = match.pred
     const selectionMap: Record<string, string> = {
       home_win:   `${match.homeTeam} gana (1)`,

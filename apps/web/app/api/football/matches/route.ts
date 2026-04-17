@@ -14,6 +14,7 @@ const LEAGUES: Array<{ key: string; name: string; espnSlug: string }> = [
   { key: 'serie-a',          name: 'Serie A',           espnSlug: 'ita.1'                  },
   { key: 'ligue-1',          name: 'Ligue 1',           espnSlug: 'fra.1'                  },
   { key: 'libertadores',     name: 'Copa Libertadores', espnSlug: 'conmebol.libertadores'  },
+  { key: 'copa-sudamericana',name: 'Copa Sudamericana', espnSlug: 'conmebol.sudamericana'  },
 ]
 
 // ── Fetch helper ──────────────────────────────────────────────────────────────

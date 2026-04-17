@@ -375,7 +375,7 @@ export default function ScrapingHubClient() {
                 ['premier-league', '🏴‍☠️ Premier'], ['la-liga', '🇪🇸 La Liga'],
                 ['bundesliga', '🇩🇪 Bundesliga'], ['serie-a', '🇮🇹 Serie A'],
                 ['champions-league', '⭐ Champions'], ['libertadores', '🏆 Libertadores'],
-                ['world-cup-2026', '🌐 Mundial 2026'],
+                ['copa-sudamericana', '🔥 Sudamericana'], ['world-cup-2026', '🌐 Mundial 2026'],
               ].map(([key, label]) => (
                 <button
                   key={key}

@@ -464,21 +464,31 @@ class BetplayFootballScraper:
                         text = await block.inner_text()
                         lines = [l.strip() for l in text.split("\n") if l.strip()]
                         teams, odds_vals = [], []
+                        
                         for line in lines:
-                            try:
-                                val = float(line.replace(",", "."))
-                                if 1.01 <= val <= 30:
-                                    odds_vals.append(val)
-                            except ValueError:
-                                if 4 <= len(line) <= 40 and not line.replace(".", "").replace(",", "").isdigit():
-                                    teams.append(line)
+                            # Exclude lines with numbers logically to isolate team names
+                            if 4 <= len(line) <= 40 and not any(c.isdigit() for c in line):
+                                teams.append(line)
+
+                        # Safely extract odds strictly from button elements to ignore layout prefixes (e.g. totals/times)
+                        # Remove newlines and split safely for betplay odds structure inside buttons
+                        btn_texts = await block.evaluate("node => Array.from(node.querySelectorAll('button')).map(b => b.innerText)")
+                        for b_text in btn_texts:
+                            parts = b_text.split()
+                            for p in parts:
+                                try:
+                                    val = float(p.replace(",", "."))
+                                    if 1.01 <= val <= 30.0:
+                                        odds_vals.append(val)
+                                except ValueError:
+                                    pass
 
                         if len(teams) >= 2 and len(odds_vals) >= 2:
                             odds_list.append({
                                 "home_team":    teams[0],
                                 "away_team":    teams[1],
                                 "home_win_odd": odds_vals[0],
-                                "draw_odd":     odds_vals[1] if len(odds_vals) > 1 else None,
+                                "draw_odd":     odds_vals[1] if len(odds_vals) > 2 else None,
                                 "away_win_odd": odds_vals[2] if len(odds_vals) > 2 else odds_vals[1],
                                 "bookmaker":    source,
                                 "sport":        "football",

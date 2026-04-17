@@ -28,15 +28,11 @@ interface Bet {
   bookmaker:    string
 }
 
-// ---- Demo data — replaced by live Supabase data once bets are added -----
 const DEMO_BETS: Bet[] = [
   { id: 'b1', match: 'Celtics vs Knicks',        sport: 'nba',      market: 'Moneyline',  selection: 'Boston Celtics', odd_at_bet: 1.65, amount_cop: 45000, potential_win: 74250,  status: 'won',     profit_loss:  29250, bet_week: '2026-04-07', date: '2026-04-08', bookmaker: 'rushbet' },
   { id: 'b2', match: 'Real Madrid vs Barça',     sport: 'football', market: 'Over 2.5',   selection: 'Over',           odd_at_bet: 1.80, amount_cop: 25000, potential_win: 45000,  status: 'won',     profit_loss:  20000, bet_week: '2026-04-07', date: '2026-04-09', bookmaker: 'betplay' },
   { id: 'b3', match: 'Lakers vs Warriors',       sport: 'nba',      market: 'Moneyline',  selection: 'LA Lakers',      odd_at_bet: 1.90, amount_cop: 30000, potential_win: 57000,  status: 'lost',    profit_loss: -30000, bet_week: '2026-04-07', date: '2026-04-09', bookmaker: 'rushbet' },
   { id: 'b4', match: 'Djokovic vs Alcaraz',      sport: 'tennis',   market: 'Ganador',    selection: 'Djokovic',       odd_at_bet: 1.65, amount_cop: 20000, potential_win: 33000,  status: 'pending', profit_loss:       0, bet_week: '2026-04-07', date: '2026-04-11', bookmaker: 'rushbet' },
-  { id: 'b5', match: 'Nuggets vs Thunder',       sport: 'nba',      market: 'Moneyline',  selection: 'Denver Nuggets', odd_at_bet: 1.55, amount_cop: 28000, potential_win: 43400,  status: 'pending', profit_loss:       0, bet_week: '2026-04-14', date: '2026-04-15', bookmaker: 'rushbet' },
-  { id: 'b6', match: 'Man City vs Arsenal',      sport: 'football', market: 'BTTS Si',    selection: 'Ambos marcan',   odd_at_bet: 1.70, amount_cop: 20000, potential_win: 34000,  status: 'won',     profit_loss:  14000, bet_week: '2026-04-07', date: '2026-04-07', bookmaker: 'betplay' },
-  { id: 'b7', match: 'Heat vs 76ers',            sport: 'nba',      market: 'Moneyline',  selection: '76ers',          odd_at_bet: 1.78, amount_cop: 20000, potential_win: 35600,  status: 'lost',    profit_loss: -20000, bet_week: '2026-04-07', date: '2026-04-08', bookmaker: 'betplay' },
 ]
 
 const LOSS_REASONS = [
@@ -47,10 +43,22 @@ const LOSS_REASONS = [
   { id: 'injury_key_player',     label: '🏥 Lesión jugador clave' },
 ]
 
+// Helper to get current week's Monday in local date formatted string
+function getMonday(d: Date) {
+  d = new Date(d)
+  const day = d.getDay()
+  const diff = d.getDate() - day + (day === 0 ? -6 : 1)
+  return new Date(d.setDate(diff))
+}
+
 export default function MisApuestasClient() {
   const [sportFilter,  setSportFilter]  = useState<SportFilter>('all')
-  const [currentWeek,  setCurrentWeek]  = useState('2026-04-07')
-  const [bets,         setBets]         = useState<Bet[]>(DEMO_BETS)
+  const [currentWeek,  setCurrentWeek]  = useState(() => {
+    return getMonday(new Date()).toISOString().split('T')[0]
+  })
+  
+  const [bets,         setBets]         = useState<Bet[]>([])
+  const [loadingBets,  setLoadingBets]  = useState(true)
   const [updating,     setUpdating]     = useState<string | null>(null)
 
   // Loss modal state
@@ -61,28 +69,79 @@ export default function MisApuestasClient() {
   const [patterns,     setPatterns]     = useState<any[]>([])
 
   useEffect(() => {
-    async function loadPatterns() {
+    async function initData() {
       try {
         const sup = createClient()
         const { data: { user } } = await sup.auth.getUser()
-        const uid = user?.id || 'demo' 
+
+        const uid = user?.id || 'demo'
         const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-        const res = await fetch(`${API_URL}/api/analyze/patterns/${uid}`)
-        if (res.ok) {
-          const data = await res.json()
-          setPatterns(data.patterns || [])
+        
+        // Fetch patterns passively
+        fetch(`${API_URL}/api/analyze/patterns/${uid}`)
+          .then(res => res.json())
+          .then(data => setPatterns(data.patterns || []))
+          .catch(() => {})
+
+          if (user) {
+          // Direct Supabase query to bypass API/CORS points of failure
+          const { data: betsData, error: betsError } = await sup.from('bets')
+            .select(`*, match:matches(*)`)
+            .eq('user_id', user.id)
+            .order('created_at', { ascending: false })
+
+          if (betsError) {
+            console.error("Supabase bets select error:", betsError)
+          }
+
+          if (!betsError && betsData && betsData.length > 0) {
+            const mappedBets: Bet[] = betsData.map((b: any) => {
+              // Matches table raw data or fallback
+              const matchName = typeof b.match === 'string' ? b.match : 
+                 (b.match_id?.includes('demo') || !b.match_id ? 'Mi Apuesta' : 'Torneo Oficial')
+              
+              const expectedPotential = Math.round(b.amount_cop * b.odd_at_bet)
+
+              return {
+                id: b.id,
+                match: matchName,
+                sport: b.match?.sport || 'nba',
+                market: b.market,
+                selection: b.selection,
+                odd_at_bet: b.odd_at_bet,
+                amount_cop: b.amount_cop,
+                potential_win: b.potential_win_cop || expectedPotential,
+                status: b.status,
+                profit_loss: b.profit_loss_cop || 0,
+                bet_week: b.bet_week,
+                date: b.created_at ? b.created_at.split('T')[0] : b.bet_week,
+                bookmaker: b.bookmaker
+              }
+            setBets(mappedBets)
+          } else {
+            setBets([])
+          }
+        } else {
+          setBets([])
         }
       } catch (err) {
-        // fail silently
+        setBets([])
+      } finally {
+        setLoadingBets(false)
       }
     }
-    loadPatterns()
+    initData()
   }, [])
+
+
 
   // Weeks navigation
   const weekStart = new Date(currentWeek)
   const weekEnd   = new Date(weekStart)
   weekEnd.setDate(weekEnd.getDate() + 6)
+  
+  const weekStartStr = weekStart.toISOString().split('T')[0]
+  const weekEndStr   = weekEnd.toISOString().split('T')[0]
 
   function prevWeek() {
     const d = new Date(currentWeek)
@@ -95,7 +154,12 @@ export default function MisApuestasClient() {
     setCurrentWeek(d.toISOString().split('T')[0])
   }
 
-  const weekBets = bets.filter(b => b.bet_week === currentWeek)
+  // Use standard dates comparison instead of strict bet_week comparison
+  const weekBets = bets.filter(b => {
+    const d = b.date || b.bet_week
+    return d >= weekStartStr && d <= weekEndStr
+  })
+  
   const totalApostado = weekBets.reduce((sum, b) => sum + b.amount_cop, 0)
   const totalGanado   = weekBets.filter(b => b.status === 'won').reduce((sum, b) => sum + b.potential_win, 0)
   const profitLoss    = weekBets.reduce((sum, b) => sum + b.profit_loss, 0)
@@ -106,7 +170,6 @@ export default function MisApuestasClient() {
   const successPct    = finishedCount > 0 ? (wonCount / finishedCount) * 100 : 0
 
   const pendingBets = weekBets.filter(b => b.status === 'pending')
-
   const allBets = bets.filter(b => sportFilter === 'all' || b.sport === sportFilter)
 
   async function markResult(betId: string, result: 'won' | 'lost') {
@@ -115,13 +178,26 @@ export default function MisApuestasClient() {
       setLossModal({ betId, match: bet?.match || '' })
       return
     }
+    
     setUpdating(betId)
     try {
       const supabase = createClient()
-      await supabase.from('bets').update({
-        status: 'won',
-        result_confirmed_at: new Date().toISOString(),
-      }).eq('id', betId)
+      const { data: { user } } = await supabase.auth.getUser()
+      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+      
+      if (user && !betId.startsWith('b')) {
+        await fetch(`${API_URL}/api/bets/${betId}/result`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'won' })
+        }).catch(() => {})
+      } else {
+        // Fallback or demo update
+        await supabase.from('bets').update({
+          status: 'won',
+          result_confirmed_at: new Date().toISOString(),
+        }).eq('id', betId).catch(() => {})
+      }
     } catch { /* local update fallback */ }
 
     setBets(prev => prev.map(b =>
@@ -137,23 +213,32 @@ export default function MisApuestasClient() {
     try {
       const supabase = createClient()
       const { data: { user } } = await supabase.auth.getUser()
+      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
-      // Notify backend if real user
-      if (user) {
-        const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+      if (user && !lossModal.betId.startsWith('b')) {
+        await fetch(`${API_URL}/api/bets/${lossModal.betId}/result`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            status: 'lost',
+            loss_reason: lossReason,
+            loss_description: lossNotes
+          })
+        }).catch(() => {})
+        
         await fetch(`${API_URL}/api/analyze/loss`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ bet_id: lossModal.betId })
         }).catch(() => {})
+
       } else {
-        // Fallback manual local update
         await supabase.from('bets').update({
           status: 'lost',
           loss_reason: lossReason,
           result_confirmed_at: new Date().toISOString(),
           profit_loss_cop: -(bets.find(b => b.id === lossModal.betId)?.amount_cop || 0),
-        }).eq('id', lossModal.betId)
+        }).eq('id', lossModal.betId).catch(() => {})
       }
     } catch { /* local fallback */ }
 
@@ -186,6 +271,14 @@ export default function MisApuestasClient() {
     s === 'nba' ? <Trophy className="w-3.5 h-3.5 text-nba-blue" /> :
     s === 'football' ? <Globe className="w-3.5 h-3.5 text-football-green" /> :
     <Dumbbell className="w-3.5 h-3.5 text-tennis-orange" />
+
+  if (loadingBets) {
+    return (
+      <div className="flex items-center justify-center p-20">
+        <Loader2 className="w-10 h-10 animate-spin text-accent" />
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-8">
@@ -259,7 +352,7 @@ export default function MisApuestasClient() {
       {/* Active / Pending Bets */}
       {pendingBets.length > 0 && (
         <div>
-          <h3 className="section-title mb-4">Apuestas Activas ({pendingBets.length})</h3>
+          <h3 className="section-title mb-4">Apuestas Activas de la Semana ({pendingBets.length})</h3>
           <div className="space-y-3">
             {pendingBets.map(bet => (
               <div key={bet.id} className="card border-warning/20">
@@ -309,7 +402,7 @@ export default function MisApuestasClient() {
       {/* History */}
       <div>
         <div className="flex items-center justify-between mb-4">
-          <h3 className="section-title">Historial de Apuestas</h3>
+          <h3 className="section-title">Historial de Apuestas (Todas)</h3>
           <div className="flex items-center gap-3">
             {/* Sport filter tabs */}
             <div className="flex items-center gap-1 bg-surface-2 rounded-lg p-1">
@@ -386,7 +479,7 @@ export default function MisApuestasClient() {
                 ))}
                 {/* Totals row */}
                 <tr className="bg-surface-2/40 font-bold">
-                  <td colSpan={4} className="px-4 py-3 text-xs text-text-muted uppercase">Totales</td>
+                  <td colSpan={4} className="px-4 py-3 text-xs text-text-muted uppercase">Totales Filtrados</td>
                   <td className="px-4 py-3 text-sm text-text">{formatCOP(allBets.reduce((s, b) => s + b.amount_cop, 0))}</td>
                   <td className="px-4 py-3 text-xs text-text-muted">{allBets.filter(b => b.status === 'won').length} ganadas</td>
                   <td className={cn(

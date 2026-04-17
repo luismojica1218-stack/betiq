@@ -5,47 +5,7 @@ import { Trophy, RefreshCw, Clock, Filter, ChevronDown, PlusCircle, TrendingUp, 
 import { cn, formatCOP, getEVLabel } from '@/lib/utils'
 import ConfirmBetModal, { type BetCandidate } from '@/components/ui/ConfirmBetModal'
 
-// ---- Demo data (populated by ML predictions once scrapers run) ----
-const DEMO_MATCHES = [
-  {
-    id: 'nba-1', homeTeam: 'Boston Celtics', awayTeam: 'Miami Heat',
-    date: 'Hoy, 19:30', status: 'scheduled',
-    odds: { home: 1.25, away: 4.30 },
-    prediction: { winner: 'home', prob: 0.82, ev: 0.025, betType: 'parlay' as const, amount: 45000, confidence: 0.82 },
-  },
-  {
-    id: 'nba-2', homeTeam: 'Denver Nuggets', awayTeam: 'LA Lakers',
-    date: 'Hoy, 21:00', status: 'scheduled',
-    odds: { home: 1.55, away: 2.65 },
-    prediction: { winner: 'home', prob: 0.70, ev: 0.085, betType: 'fixed' as const, amount: 32000, confidence: 0.70 },
-  },
-  {
-    id: 'nba-3', homeTeam: 'Oklahoma City Thunder', awayTeam: 'New Orleans Pelicans',
-    date: 'Mañana, 20:00', status: 'scheduled',
-    odds: { home: 1.45, away: 2.95 },
-    prediction: { winner: 'home', prob: 0.75, ev: 0.087, betType: 'parlay' as const, amount: 28000, confidence: 0.75 },
-  },
-  {
-    id: 'nba-4', homeTeam: 'New York Knicks', awayTeam: 'Philadelphia 76ers',
-    date: 'Mañana, 19:00', status: 'scheduled',
-    odds: { home: 1.85, away: 2.05 },
-    prediction: { winner: 'home', prob: 0.58, ev: 0.073, betType: 'fixed' as const, amount: 20000, confidence: 0.58 },
-  },
-  {
-    id: 'nba-5', homeTeam: 'Minnesota Timberwolves', awayTeam: 'Phoenix Suns',
-    date: 'Próx. 7 días', status: 'scheduled',
-    odds: { home: 1.70, away: 2.25 },
-    prediction: { winner: 'away', prob: 0.48, ev: 0.080, betType: 'parlay' as const, amount: 35000, confidence: 0.48 },
-  },
-  {
-    id: 'nba-6', homeTeam: 'LA Clippers', awayTeam: 'Dallas Mavericks',
-    date: 'Próx. 7 días', status: 'scheduled',
-    odds: { home: 1.95, away: 1.95 },
-    prediction: { winner: 'away', prob: 0.53, ev: 0.033, betType: 'fixed' as const, amount: 0, confidence: 0.53 },
-  },
-]
-
-
+// ---- Market types ----
 type FilterDate = 'today' | 'tomorrow' | '7days'
 type FilterType = 'all' | 'fixed' | 'parlay'
 
@@ -55,8 +15,12 @@ export default function NBAPage() {
   const [minEV,      setMinEV]      = useState(0)
   const [activeBet,  setActiveBet]  = useState<BetCandidate | null>(null)
   const [confirmedIds, setConfirmedIds] = useState<Set<string>>(new Set())
-  const [liveMatches, setLiveMatches] = useState<typeof DEMO_MATCHES>(DEMO_MATCHES)
+  const [liveMatches, setLiveMatches] = useState<any[]>([])
   const [isLoading, setIsLoading] = useState(true)
+
+  const [activeMarket, setActiveMarket] = useState<'moneyline' | 'props'>('moneyline')
+  const [propsList, setPropsList] = useState<any[]>([])
+  const [isPropsLoading, setIsPropsLoading] = useState(false)
 
   useEffect(() => {
     async function fetchMatches() {
@@ -100,6 +64,19 @@ export default function NBAPage() {
     fetchMatches()
   }, [])
 
+  useEffect(() => {
+    if (activeMarket !== 'props' || propsList.length > 0) return
+    async function fetchProps() {
+      setIsPropsLoading(true)
+      try {
+        const res = await fetch(`/api/nba/props`)
+        if (res.ok) setPropsList((await res.json()).props || [])
+      } catch(e) { }
+      finally { setIsPropsLoading(false) }
+    }
+    fetchProps()
+  }, [activeMarket])
+
   const filtered = liveMatches.filter(m => {
     if (filterDate === 'today' && !m.date.startsWith('Hoy')) return false
     if (filterDate === 'tomorrow' && !m.date.startsWith('Mañana')) return false
@@ -109,7 +86,7 @@ export default function NBAPage() {
     return true
   })
 
-  function openBetModal(match: typeof DEMO_MATCHES[0]) {
+  function openBetModal(match: any) {
     const pred = match.prediction
     const isHome = pred.winner === 'home'
     setActiveBet({
@@ -153,7 +130,27 @@ export default function NBAPage() {
         </div>
       </div>
 
-      {/* Filters */}
+      {/* Market Selector */}
+      <div className="flex items-center gap-1 bg-surface-2 rounded-xl p-1.5 w-max mb-1">
+        {[
+          { id: 'moneyline', label: 'Equipos (1X2 / Spread)' },
+          { id: 'props', label: 'Jugadores (PRA)' }
+        ].map(m => (
+          <button
+            key={m.id}
+            onClick={() => setActiveMarket(m.id as any)}
+            className={cn(
+              'px-4 py-2 rounded-lg text-sm font-semibold transition-all',
+              activeMarket === m.id ? 'bg-surface text-text shadow-md' : 'text-text-muted hover:text-text'
+            )}
+          >
+            {m.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Filters (only for moneyline usually, but EV filter applies to both) */}
+      {activeMarket === 'moneyline' && (
       <div className="card py-4">
         <div className="flex flex-wrap items-center gap-4">
           {/* Date filter */}
@@ -201,10 +198,89 @@ export default function NBAPage() {
           </div>
         </div>
       </div>
+      )}
 
       {/* Match grid */}
       <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
-        {isLoading ? (
+        {activeMarket === 'props' ? (
+          isPropsLoading ? (
+            <div className="col-span-full text-center py-12 text-text-muted">
+              <Loader2 className="w-8 h-8 animate-spin mx-auto mb-3" />
+              <p>Calculando proyecciones de jugadores...</p>
+            </div>
+          ) : propsList.length === 0 ? (
+            <div className="col-span-full text-center py-12 text-text-muted">
+              <Trophy className="w-12 h-12 mx-auto mb-3 opacity-20" />
+              <p>No hay líneas PRA generadas para los partidos de hoy</p>
+            </div>
+          ) : (
+            propsList.filter(p => p.prediction.ev * 100 >= minEV).map(prop => {
+              const evPct = (prop.prediction.ev * 100).toFixed(1)
+              const evGood = prop.prediction.ev >= 0.08
+              const evOk = prop.prediction.ev >= 0.05
+              const confirmed = confirmedIds.has(prop.id)
+              return (
+                <div key={prop.id} className={cn('card relative overflow-hidden group transition-all duration-300', evGood && 'border-green-500/20')}>
+                  <div className="absolute top-0 right-0 px-3 py-1 text-xs font-bold bg-accent text-white" style={{ borderRadius: '0 0 0 8px' }}>
+                    PRA PROP
+                  </div>
+                  <div className="mb-4">
+                    <div className="text-sm font-bold text-text-muted mb-1">{prop.team}</div>
+                    <div className="text-xl font-bold text-text">{prop.player}</div>
+                    <div className="text-xs text-text-muted mt-1">Línea Puntos + Rebotes + Asistencias</div>
+                  </div>
+                  <div className="flex items-center justify-between mb-3 p-2.5 bg-surface-2/60 rounded-lg">
+                    <div>
+                      <div className="text-xs text-text-muted">Pred. PRA</div>
+                      <div className="text-sm font-bold text-text">{prop.prediction.expected_pra}</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-xs text-text-muted">Línea Sug.</div>
+                      <div className="text-sm font-bold text-accent">{prop.prediction.recommended} {prop.line}</div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-xs text-text-muted">Cuota</div>
+                      <div className="text-sm font-bold text-text">{prop.prediction.recommended === 'OVER' ? prop.odds.over : prop.odds.under}</div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 mb-4">
+                    <span className={cn('badge', evGood ? 'badge-success' : evOk ? 'badge-warning' : 'badge-danger')}>
+                      {evGood ? '✓' : evOk ? '~' : '!'} EV: {evPct}%
+                    </span>
+                  </div>
+                  {confirmed ? (
+                    <div className="w-full py-2.5 rounded-lg bg-success/10 border border-success/20 text-success text-sm font-semibold text-center">
+                      ✓ Registrada
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => {
+                        setActiveBet({
+                          matchId: prop.match_id || prop.id,
+                          homeTeam: prop.team,
+                          awayTeam: 'Oponente',
+                          sport: 'nba',
+                          market: 'Player Props (PRA)',
+                          selection: `${prop.player} ${prop.prediction.recommended} ${prop.line} PRA`,
+                          suggestedOdd: prop.prediction.recommended === 'OVER' ? prop.odds.over : prop.odds.under,
+                          suggestedAmount: evGood ? 25000 : 10000,
+                          confidence: prop.prediction.prob,
+                          expectedValue: prop.prediction.ev,
+                          betType: 'fixed'
+                        })
+                      }}
+                      disabled={prop.prediction.ev < 0.03}
+                      className={cn('w-full flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-semibold transition-all', prop.prediction.ev >= 0.03 ? 'btn-primary' : 'bg-surface-2 text-text-muted cursor-not-allowed')}
+                    >
+                      <PlusCircle className="w-4 h-4" />
+                      Agregar apuesta de jugador
+                    </button>
+                  )}
+                </div>
+              )
+            })
+          )
+        ) : isLoading ? (
           <div className="col-span-full text-center py-12 text-text-muted">
             <Loader2 className="w-8 h-8 animate-spin mx-auto mb-3" />
             <p>Conectando con Supabase y Scrapers...</p>
