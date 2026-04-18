@@ -117,6 +117,7 @@ export default function MisApuestasClient() {
                 date: b.created_at ? b.created_at.split('T')[0] : b.bet_week,
                 bookmaker: b.bookmaker
               }
+            })
             setBets(mappedBets)
           } else {
             setBets([])
