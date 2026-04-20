@@ -1,17 +1,15 @@
 """
 BetIQ — NBA Scraper
-Fuentes: basketball-reference.com (stats) + rushbet.co (odds via Playwright)
+Fuentes: basketball-reference.com (stats) + ESPN API/DraftKings (odds)
 """
 import asyncio
 import logging
 import random
-import time
 from datetime import datetime, timedelta, timezone
-from typing import AsyncGenerator, Optional
+from typing import Optional
 
 import httpx
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright
 
 from constants import REQUEST_DELAY_MIN, REQUEST_DELAY_MAX, MAX_RETRIES, HEADERS
 
@@ -395,17 +393,41 @@ class NBAStatsScraper:
         }
 
 
-class RushbetNBAScraper:
-    """Scrapes NBA odds from rushbet.co using Playwright."""
+class ESPNNBAOddsScraper:
+    """
+    Scrapes NBA odds from the public ESPN API (DraftKings spreads + OU).
+    Replaces the Rushbet Playwright scraper which fails due to Kambi headless detection.
+    ESPN returns: spread, over/under, and we convert American-line spread to decimal odds.
+    """
 
-    RUSHBET_NBA_URL = "https://rushbet.co/deportes/#/sports/Basketball/USA/NBA"
+    ESPN_NBA_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
+
+    @staticmethod
+    def _american_to_decimal(american: int) -> float:
+        """Convert American moneyline to decimal odds."""
+        if american >= 0:
+            return round(american / 100 + 1, 3)
+        else:
+            return round(100 / abs(american) + 1, 3)
+
+    @staticmethod
+    def _spread_to_decimal(spread: float) -> tuple[float, float]:
+        """Estimate home/away decimal odds from point spread (rough approximation)."""
+        # Typical -110 juice on spread bets → 1.909 decimal
+        # Favourite: slightly less payout, underdog: slightly more
+        base = 1.909
+        adjustment = abs(spread) * 0.005  # small modifier based on spread size
+        if spread < 0:  # home is favourite
+            return round(base - adjustment, 3), round(base + adjustment, 3)
+        else:            # away is favourite
+            return round(base + adjustment, 3), round(base - adjustment, 3)
 
     async def scrape_nba_odds(
         self, log_queue: Optional[asyncio.Queue] = None
     ) -> list[dict]:
         """
-        Navigate Rushbet and extract NBA odds.
-        Returns: [{home_team, away_team, ml_home, ml_away, ou_total, ou_over, ou_under, spread}]
+        Fetch NBA odds from ESPN (DraftKings) public API.
+        Returns: [{home_team, away_team, ml_home, ml_away, spread, ou_total, ou_over, ou_under, bookmaker, match_date}]
         """
         odds_list = []
 
@@ -414,91 +436,125 @@ class RushbetNBAScraper:
             if log_queue:
                 await log_queue.put({"type": "log", "message": msg})
 
-        await log("🎰 Rushbet NBA: iniciando Playwright...")
+        await log("📡 ESPN NBA Odds: consultando API pública de ESPN (DraftKings)...")
+
+        today = datetime.now(timezone.utc)
+        end   = today + timedelta(days=7)
+        date_range = f"{today.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}"
+        url = f"{self.ESPN_NBA_URL}?dates={date_range}"
 
         try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+            async with httpx.AsyncClient() as client:
+                r = await client.get(
+                    url,
+                    headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"},
+                    timeout=20.0,
                 )
-                context = await browser.new_context(
-                    user_agent=HEADERS["User-Agent"],
-                    locale="es-CO",
-                    timezone_id="America/Bogota",
-                )
-                page = await context.new_page()
-
-                await log(f"🌐 Navegando a {self.RUSHBET_NBA_URL}...")
-                await page.goto(self.RUSHBET_NBA_URL, wait_until="networkidle", timeout=30000)
-                await asyncio.sleep(3)
-
-                # Accept cookies if present
-                try:
-                    accept_btn = page.locator("button:has-text('Aceptar'), button:has-text('Accept')")
-                    if await accept_btn.count() > 0:
-                        await accept_btn.first.click()
-                        await asyncio.sleep(1)
-                except Exception:
-                    pass
-
-                # Scroll to load more events
-                for _ in range(3):
-                    await page.evaluate("window.scrollBy(0, 500)")
-                    await asyncio.sleep(1)
-
-                await log("🔍 Extrayendo cuotas de partidos NBA...")
-
-                # Extract match blocks
-                match_blocks = await page.query_selector_all("[class*='event'], [class*='match'], [class*='game']")
-                await log(f"📋 Encontrados {len(match_blocks)} bloques de partidos")
-
-                for block in match_blocks[:20]:  # Limit to first 20
-                    try:
-                        text = await block.inner_text()
-                        lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
-
-                        # Parse team names
-                        teams, odds_vals = [], []
-                        for line in lines:
-                            if len(line) > 3 and not any(c.isdigit() for c in line[:3]):
-                                teams.append(line)
-
-                        # Extract odds strictly from button tags
-                        btn_texts = await block.evaluate("node => Array.from(node.querySelectorAll('button')).map(b => b.innerText)")
-                        for b_text in btn_texts:
-                            parts = b_text.split()
-                            for p in parts:
-                                try:
-                                    val = float(p.replace(",", "."))
-                                    if 1.01 <= val <= 50.0:
-                                        odds_vals.append(val)
-                                except ValueError:
-                                    pass
-
-                        if len(teams) >= 2 and len(odds_vals) >= 2:
-                            odds_list.append({
-                                "home_team": teams[0],
-                                "away_team": teams[1],
-                                "ml_home":   odds_vals[0] if len(odds_vals) > 0 else None,
-                                "ml_away":   odds_vals[1] if len(odds_vals) > 1 else None,
-                                "ou_total":  220.5,
-                                "bookmaker": "rushbet",
-                                "market":    "moneyline",
-                                "sport":     "nba",
-                            })
-                    except Exception as e:
-                        logger.debug(f"Error parsing match block: {e}")
-
-                await browser.close()
-
+                if not r.is_success:
+                    await log(f"⚠️ ESPN devolvió status {r.status_code}")
+                    return []
+                data = r.json()
         except Exception as e:
-            await log(f"⚠️ Error en Rushbet scraper: {e}. El usuario puede ingresar cuotas manualmente.")
-            # Return empty but don't crash
+            await log(f"⚠️ Error conectando ESPN: {e}")
             return []
 
-        await log(f"✅ Cuotas obtenidas: {len(odds_list)} partidos NBA")
+        events = data.get("events", [])
+        await log(f"📋 Encontrados {len(events)} eventos ESPN NBA")
+
+        for event in events:
+            try:
+                comp = event.get("competitions", [{}])[0]
+                status_type = comp.get("status", {}).get("type", {}).get("name", "")
+
+                # Skip finished or in-progress games
+                if "FINAL" in status_type or "IN_PROGRESS" in status_type:
+                    continue
+
+                competitors = comp.get("competitors", [])
+                home = next((c for c in competitors if c.get("homeAway") == "home"), None)
+                away = next((c for c in competitors if c.get("homeAway") == "away"), None)
+                if not (home and away):
+                    continue
+
+                home_name = home.get("team", {}).get("displayName", "")
+                away_name = away.get("team", {}).get("displayName", "")
+                date_str  = event.get("date", "")
+
+                if not (home_name and away_name):
+                    continue
+
+                # Parse ESPN odds (DraftKings provider)
+                espn_odds = comp.get("odds", [])
+                spread_val, ou_total = None, None
+                ml_home, ml_away    = None, None
+
+                if espn_odds:
+                    o = espn_odds[0]  # First odds provider (usually DraftKings)
+                    details   = o.get("details", "")      # e.g. "BOS -7.5"
+                    ou_total  = o.get("overUnder")         # e.g. 213.5
+                    ml_home_am = o.get("homeTeamOdds", {}).get("moneyLine")
+                    ml_away_am = o.get("awayTeamOdds", {}).get("moneyLine")
+
+                    # Parse spread from details string (e.g. "HOU -4.5" means HOME is -4.5)
+                    if details:
+                        parts = details.split()
+                        if len(parts) >= 2:
+                            try:
+                                raw_spread = float(parts[-1])
+                                # Determine if the abbr is home or away team
+                                spread_abbr = " ".join(parts[:-1]).upper()
+                                home_abbr   = home.get("team", {}).get("abbreviation", "").upper()
+                                if spread_abbr == home_abbr:
+                                    spread_val = raw_spread  # e.g. -7.5 means home is favoured
+                                else:
+                                    spread_val = -raw_spread  # flip if it's away team's favoured
+                            except ValueError:
+                                pass
+
+                    # Convert American ML to decimal if available
+                    if ml_home_am is not None:
+                        try:
+                            ml_home = self._american_to_decimal(int(ml_home_am))
+                        except (ValueError, TypeError):
+                            pass
+                    if ml_away_am is not None:
+                        try:
+                            ml_away = self._american_to_decimal(int(ml_away_am))
+                        except (ValueError, TypeError):
+                            pass
+
+                # If no moneyline, estimate from spread
+                if ml_home is None or ml_away is None:
+                    if spread_val is not None:
+                        ml_home, ml_away = self._spread_to_decimal(spread_val)
+                    else:
+                        ml_home, ml_away = 1.909, 1.909  # default -110 both sides
+
+                record = {
+                    "home_team":  home_name,
+                    "away_team":  away_name,
+                    "ml_home":    ml_home,
+                    "ml_away":    ml_away,
+                    "spread":     spread_val,
+                    "ou_total":   float(ou_total) if ou_total is not None else None,
+                    "ou_over":    float(ou_total) if ou_total is not None else None,
+                    "ou_under":   float(ou_total) if ou_total is not None else None,
+                    "bookmaker":  "draftkings_via_espn",
+                    "market":     "moneyline",
+                    "sport":      "nba",
+                    "match_date": date_str,
+                }
+                odds_list.append(record)
+
+            except Exception as e:
+                logger.debug(f"Error parsing ESPN event: {e}")
+
+        await log(f"✅ Cuotas obtenidas: {len(odds_list)} partidos NBA (ESPN/DraftKings)")
         return odds_list
+
+
+# Keep old class name as alias so nothing else breaks
+RushbetNBAScraper = ESPNNBAOddsScraper
 
 
 # -------------------- Module-level convenience functions --------------------
@@ -532,7 +588,7 @@ async def run_nba_stats_scrape(log_queue: asyncio.Queue) -> dict:
 
 
 async def run_nba_odds_scrape(log_queue: asyncio.Queue) -> dict:
-    """Entry point called by the FastAPI router."""
-    scraper = RushbetNBAScraper()
+    """Entry point called by the FastAPI router. Uses ESPN API (DraftKings odds)."""
+    scraper = ESPNNBAOddsScraper()
     odds = await scraper.scrape_nba_odds(log_queue=log_queue)
     return {"odds": odds, "count": len(odds)}
