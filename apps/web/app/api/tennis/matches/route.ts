@@ -140,7 +140,9 @@ function computeTennis(
     { key: 'handicap_p1', p: pHandP1, odd: hnP1Odd },
     { key: 'over_games',  p: pOver,   odd: overOdd  },
   ]
-  const best = markets.reduce((a, b) => a.p * a.odd > b.p * b.odd ? a : b)
+  const eligible = markets.filter(m => m.p >= 0.18 && m.odd <= 5.50)
+  const pool = eligible.length > 0 ? eligible : markets.filter(m => m.p >= 0.15)
+  const best = (pool.length > 0 ? pool : markets).reduce((a, b) => a.p * a.odd > b.p * b.odd ? a : b)
   const ev   = Math.max(0, +(best.p * best.odd - 1).toFixed(4))
 
   return {

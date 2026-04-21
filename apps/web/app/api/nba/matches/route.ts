@@ -115,7 +115,9 @@ function computeMatch(homeQ: TeamQuality, awayQ: TeamQuality, matchId: string) {
     { market: 'over',  prob: pOver,      odd: overOdd,  ev: +(pOver      * overOdd  - 1).toFixed(4) },
     { market: 'under', prob: 1 - pOver,  odd: underOdd, ev: +((1-pOver)  * underOdd - 1).toFixed(4) },
   ]
-  const best = allMarkets.reduce((a, b) => a.ev > b.ev ? a : b)
+  const eligible = allMarkets.filter(m => m.prob >= 0.20 && m.odd <= 5.00)
+  const pool = eligible.length > 0 ? eligible : allMarkets.filter(m => m.prob >= 0.15)
+  const best = (pool.length > 0 ? pool : allMarkets).reduce((a, b) => a.ev > b.ev ? a : b)
 
   return {
     pHome, pAway, pOver,

@@ -185,7 +185,10 @@ function computeFootball(
     { market: 'over_2.5', label: 'Más de 2.5 goles', p: pOver, odd: overOdd },
     { market: 'btts_yes', label: 'Ambos marcan',    p: pBtts, odd: bttsYes },
   ]
-  const best = markets.reduce((a, b) => (a.p * a.odd > b.p * b.odd ? a : b))
+  // Only recommend bets with reasonable probability and odds (avoid long shots)
+  const eligible = markets.filter(m => m.p >= 0.18 && m.odd <= 5.50)
+  const pool = eligible.length > 0 ? eligible : markets.filter(m => m.p >= 0.15)
+  const best = (pool.length > 0 ? pool : markets).reduce((a, b) => (a.p * a.odd > b.p * b.odd ? a : b))
   const ev   = Math.max(0, +(best.p * best.odd - 1).toFixed(4))
 
   return {
