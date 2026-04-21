@@ -21,6 +21,14 @@ const WTA_ELO: Record<string, number> = {
 }
 
 const MARGIN = 0.045
+
+function stableFloat(seed: string, offset = 0): number {
+  let h = (offset + 1) * 2654435761
+  for (let i = 0; i < seed.length; i++) {
+    h = Math.imul(h ^ seed.charCodeAt(i), 2654435761)
+  }
+  return ((h >>> 0) % 10000) / 10000
+}
 const ESPN_ATP = 'https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard'
 const ESPN_WTA = 'https://site.api.espn.com/apis/site/v2/sports/tennis/wta/scoreboard'
 
@@ -75,15 +83,16 @@ function surfaceAdjusted(elo: number, playerName: string, surface: string): numb
   return elo
 }
 
-function computeTennis(p1Name: string, p2Name: string, tour: string, surface: string) {
+function computeTennis(p1Name: string, p2Name: string, tour: string, surface: string, matchId: string) {
   const elo1 = surfaceAdjusted(getElo(p1Name, tour), p1Name, surface)
   const elo2 = surfaceAdjusted(getElo(p2Name, tour), p2Name, surface)
 
   const p1Win = Math.max(0.08, Math.min(0.92, eloWinProb(elo1, elo2)))
   const p2Win = 1 - p1Win
 
-  // Market probability = model ± drift
-  const drift  = (Math.random() - 0.45) * 0.10
+  // Market probability = model ± stable drift (deterministic per match)
+  const sf = (n: number) => stableFloat(matchId, n)
+  const drift  = (sf(0) - 0.45) * 0.10
   const mkt1   = Math.max(0.08, Math.min(0.92, p1Win + drift))
   const mkt2   = 1 - mkt1
 
@@ -92,20 +101,20 @@ function computeTennis(p1Name: string, p2Name: string, tour: string, surface: st
 
   // Handicap (who covers -1.5 sets)
   const pHandP1 = p1Win > 0.55 ? Math.min(0.80, p1Win * 0.85) : Math.max(0.15, p1Win * 0.7)
-  const mktHnd  = Math.max(0.08, pHandP1 + (Math.random() - 0.45) * 0.08)
+  const mktHnd  = Math.max(0.08, pHandP1 + (sf(1) - 0.45) * 0.08)
   const hnP1Odd = +((1 / mktHnd) * (1 - MARGIN)).toFixed(2)
   const hnP2Odd = +((1 / (1 - mktHnd)) * (1 - MARGIN)).toFixed(2)
 
   // Over/under total games
   const expGames = surface === 'clay' ? 23 : surface === 'grass' ? 20 : 21
-  const pOver    = 0.45 + Math.random() * 0.15
-  const mktOv   = Math.max(0.08, pOver + (Math.random() - 0.45) * 0.08)
+  const pOver    = 0.45 + sf(2) * 0.15
+  const mktOv   = Math.max(0.08, pOver + (sf(3) - 0.45) * 0.08)
   const overOdd  = +((1 / mktOv) * (1 - MARGIN)).toFixed(2)
   const underOdd = +((1 / (1 - mktOv)) * (1 - MARGIN)).toFixed(2)
 
   // First set winner
   const pFs1  = Math.max(0.15, Math.min(0.85, p1Win * 0.9 + 0.05))
-  const mktFs = Math.max(0.08, pFs1 + (Math.random() - 0.45) * 0.08)
+  const mktFs = Math.max(0.08, pFs1 + (sf(4) - 0.45) * 0.08)
   const fsP1Odd = +((1 / mktFs) * (1 - MARGIN)).toFixed(2)
   const fsP2Odd = +((1 / (1 - mktFs)) * (1 - MARGIN)).toFixed(2)
 
@@ -126,84 +135,93 @@ function computeTennis(p1Name: string, p2Name: string, tour: string, surface: st
 }
 
 async function fetchTour(tourUrl: string, tourName: string): Promise<any[]> {
-  const today = new Date()
-  const end   = new Date(Date.now() + 10 * 86_400_000)
-  const fmt   = (d: Date) => `${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,'0')}${String(d.getUTCDate()).padStart(2,'0')}`
-  const data  = await espnFetch(`${tourUrl}?dates=${fmt(today)}-${fmt(end)}`)
+  // ESPN tennis scoreboard uses groupings[], not competitions[] at event level
+  const data  = await espnFetch(tourUrl)
   const events: any[] = data?.events || []
 
   const seen = new Set<string>()
   const matches: any[] = []
-
   for (const e of events) {
-    const comp  = e.competitions?.[0]
-    if (!comp) continue
-    const p1Comp = comp.competitors?.[0]
-    const p2Comp = comp.competitors?.[1]
-    if (!p1Comp || !p2Comp) continue
-
-    const p1Name = p1Comp.athlete?.displayName || p1Comp.team?.displayName || ''
-    const p2Name = p2Comp.athlete?.displayName || p2Comp.team?.displayName || ''
-    if (!p1Name || !p2Name) continue
-
-    const key = `${p1Name}-${p2Name}`
-    if (seen.has(key)) continue
-    seen.add(key)
-
-    const statusName = comp.status?.type?.name || ''
-    if (statusName.includes('FINAL') || statusName.includes('POST') || statusName.includes('CANCELED')) continue
-
-    const matchDate = new Date(e.date)
-    if (matchDate.getTime() < Date.now() - 24 * 3600 * 1000) continue
-
-    const tournName = e.season?.slug || e.name || 'Tournament'
-    const roundName = comp.type?.text || comp.notes?.[0]?.headline || 'Round'
+    const tournName = e.name || 'Tournament'
     const surface   = surfaceFromName(tournName)
-    const calc      = computeTennis(p1Name, p2Name, tourName, surface)
 
-    matches.push({
-      id:         e.id,
-      home_team:  { name: p1Name },
-      away_team:  { name: p2Name },
-      match_date: e.date,
-      status:     'scheduled',
-      league:     tourName,
-      round:      roundName,
-      tournament: tournName,
-      surface,
-      odds: [
-        { selection: 'home',          odd_value: calc.p1Odd   },
-        { selection: 'away',          odd_value: calc.p2Odd   },
-        { selection: 'handicap_home', odd_value: calc.hnP1Odd },
-        { selection: 'handicap_away', odd_value: calc.hnP2Odd },
-        { selection: 'over_games',    odd_value: calc.overOdd },
-        { selection: 'under_games',   odd_value: calc.underOdd},
-        { selection: 'firstset_home', odd_value: calc.fsP1Odd },
-        { selection: 'firstset_away', odd_value: calc.fsP2Odd },
-      ],
-      prediction: {
-        predicted_outcome:    calc.best.p === calc.p1Win ? 'p1_win' : calc.best.key,
-        confidence:           +calc.best.p.toFixed(4),
-        expected_value:       calc.ev,
-        recommended_market:   calc.best.key,
-        bet_type:             calc.ev >= 0.06 ? 'fixed' : 'parlay',
-        suggested_amount_cop: calc.ev > 0.10 ? 45000 : calc.ev > 0.06 ? 30000 : calc.ev > 0.03 ? 15000 : 0,
-        p1_win_prob:   +calc.p1Win.toFixed(4),
-        p2_win_prob:   +calc.p2Win.toFixed(4),
-        p_handicap_p1: +calc.pHandP1.toFixed(4),
-        p_handicap_p2: +(1 - calc.pHandP1).toFixed(4),
-        p_over_games:  +calc.pOver.toFixed(4),
-        p_under_games: +(1 - calc.pOver).toFixed(4),
-        p_firstset_p1: +Math.max(0.15, Math.min(0.85, calc.p1Win * 0.9 + 0.05)).toFixed(4),
-        p_firstset_p2: +Math.max(0.15, Math.min(0.85, calc.p2Win * 0.9 + 0.05)).toFixed(4),
-        exp_total_games: calc.expGames,
-        ou_line:       22.5,
-        best_market:   calc.best.key,
-        best_odd:      calc.best.odd,
-        elo_p1:        calc.elo1,
-        elo_p2:        calc.elo2,
-      },
-    })
+    // ESPN tennis: competitions live inside groupings
+    const groupings: any[] = e.groupings || []
+    for (const g of groupings) {
+      const gDisplay: string = g.grouping?.displayName || ''
+      if (!gDisplay.includes('Singles')) continue
+      if (tourName === 'ATP' && !gDisplay.includes("Men")) continue
+      if (tourName === 'WTA' && !gDisplay.includes("Women")) continue
+      const competitions: any[] = g.competitions || []
+
+      for (const comp of competitions) {
+        const statusName = comp.status?.type?.name || ''
+        if (statusName.includes('FINAL') || statusName.includes('POST') || statusName.includes('CANCELED')) continue
+
+        const matchDate = new Date(comp.startDate || comp.date || e.date)
+        if (matchDate.getTime() < Date.now() - 3600 * 1000) continue
+
+        const p1Comp = comp.competitors?.[0]
+        const p2Comp = comp.competitors?.[1]
+        if (!p1Comp || !p2Comp) continue
+
+        const p1Name = p1Comp.athlete?.displayName || p1Comp.team?.displayName || ''
+        const p2Name = p2Comp.athlete?.displayName || p2Comp.team?.displayName || ''
+        if (!p1Name || !p2Name || p1Name === 'TBD' || p2Name === 'TBD') continue
+
+        const key = `${p1Name}-${p2Name}`
+        if (seen.has(key)) continue
+        seen.add(key)
+
+        const roundName = comp.type?.text || 'Round'
+        const matchId   = comp.id || e.id
+        const calc      = computeTennis(p1Name, p2Name, tourName, surface, matchId)
+
+        matches.push({
+          id:         matchId,
+          home_team:  { name: p1Name },
+          away_team:  { name: p2Name },
+          match_date: comp.startDate || comp.date || e.date,
+          status:     'scheduled',
+          league:     tourName,
+          round:      roundName,
+          tournament: tournName,
+          surface,
+          odds: [
+            { selection: 'home',          odd_value: calc.p1Odd   },
+            { selection: 'away',          odd_value: calc.p2Odd   },
+            { selection: 'handicap_home', odd_value: calc.hnP1Odd },
+            { selection: 'handicap_away', odd_value: calc.hnP2Odd },
+            { selection: 'over_games',    odd_value: calc.overOdd },
+            { selection: 'under_games',   odd_value: calc.underOdd},
+            { selection: 'firstset_home', odd_value: calc.fsP1Odd },
+            { selection: 'firstset_away', odd_value: calc.fsP2Odd },
+          ],
+          prediction: {
+            predicted_outcome:    calc.best.p === calc.p1Win ? 'p1_win' : calc.best.key,
+            confidence:           +calc.best.p.toFixed(4),
+            expected_value:       calc.ev,
+            recommended_market:   calc.best.key,
+            bet_type:             calc.ev >= 0.06 ? 'fixed' : 'parlay',
+            suggested_amount_cop: calc.ev > 0.10 ? 45000 : calc.ev > 0.06 ? 30000 : calc.ev > 0.03 ? 15000 : 0,
+            p1_win_prob:   +calc.p1Win.toFixed(4),
+            p2_win_prob:   +calc.p2Win.toFixed(4),
+            p_handicap_p1: +calc.pHandP1.toFixed(4),
+            p_handicap_p2: +(1 - calc.pHandP1).toFixed(4),
+            p_over_games:  +calc.pOver.toFixed(4),
+            p_under_games: +(1 - calc.pOver).toFixed(4),
+            p_firstset_p1: +Math.max(0.15, Math.min(0.85, calc.p1Win * 0.9 + 0.05)).toFixed(4),
+            p_firstset_p2: +Math.max(0.15, Math.min(0.85, calc.p2Win * 0.9 + 0.05)).toFixed(4),
+            exp_total_games: calc.expGames,
+            ou_line:       22.5,
+            best_market:   calc.best.key,
+            best_odd:      calc.best.odd,
+            elo_p1:        calc.elo1,
+            elo_p2:        calc.elo2,
+          },
+        })
+      }
+    }
   }
   return matches
 }

@@ -25,14 +25,14 @@ export async function middleware(request: NextRequest) {
 
   const { data: { user } } = await supabase.auth.getUser()
 
-  const publicPaths = ['/login', '/register']
   const pathname = request.nextUrl.pathname
+
+  // API routes serving public sports data never require auth
+  if (pathname.startsWith('/api/')) return supabaseResponse
+
+  const publicPaths = ['/login', '/register']
   const isPublic = publicPaths.some(p => pathname.startsWith(p))
 
-  // ---- DEV MODE BYPASS ----
-  // Permite ver la UI sin tener cuenta confirmada localmente
-  // type this back to normal in production
-  
   if (!user && !isPublic) {
     const url = request.nextUrl.clone()
     url.pathname = '/login'

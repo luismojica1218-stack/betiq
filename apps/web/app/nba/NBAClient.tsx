@@ -1,8 +1,8 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Trophy, RefreshCw, Clock, Filter, ChevronDown, PlusCircle, TrendingUp, AlertTriangle, Loader2 } from 'lucide-react'
-import { cn, formatCOP, getEVLabel } from '@/lib/utils'
+import { Trophy, Clock, Filter, PlusCircle, AlertTriangle, Loader2 } from 'lucide-react'
+import { cn, formatCOP } from '@/lib/utils'
 import ConfirmBetModal, { type BetCandidate } from '@/components/ui/ConfirmBetModal'
 
 // ---- Market types ----
@@ -32,8 +32,13 @@ export default function NBAPage() {
              // Map backend format to UI format
              const mapped = data.matches.map((m: any) => {
                 const pred = m.prediction || {}
-                const homeOdd = m.odds?.find((o: any) => (o.selection || '').toLowerCase().includes('home'))?.odd_value || 1.90
-                const awayOdd = m.odds?.find((o: any) => (o.selection || '').toLowerCase().includes('away'))?.odd_value || 1.90
+
+                // Use most-recent odds per selection (backend already deduplicates by scraped_at desc)
+                const homeOddRecord = m.odds?.find((o: any) => (o.selection || '').toLowerCase().includes('home'))
+                const awayOddRecord = m.odds?.find((o: any) => (o.selection || '').toLowerCase().includes('away'))
+                const homeOdd = homeOddRecord?.odd_value || 1.90
+                const awayOdd = awayOddRecord?.odd_value || 1.90
+                const bookmakerSrc = homeOddRecord?.bookmaker || 'espn'
                 
                 return {
                   id: m.id,
@@ -41,7 +46,7 @@ export default function NBAPage() {
                   awayTeam: m.away_team?.name || 'Visitante',
                   date: new Date(m.match_date).toLocaleString('es-CO', {day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'}),
                   status: m.status,
-                  odds: { home: homeOdd, away: awayOdd },
+                  odds: { home: homeOdd, away: awayOdd, source: bookmakerSrc },
                   prediction: {
                     winner: pred.predicted_outcome === 'home' || (m.home_team?.name && pred.predicted_outcome === m.home_team.name) ? 'home' : 'away',
                     prob: pred.confidence || 0.5,
@@ -104,7 +109,7 @@ export default function NBAPage() {
     })
   }
 
-  function handleConfirmed(betId: string) {
+  function handleConfirmed(_betId: string) {
     if (activeBet) {
       setConfirmedIds(prev => new Set(Array.from(prev).concat(activeBet.matchId)))
     }
@@ -294,7 +299,6 @@ export default function NBAPage() {
           filtered.map(match => {
             const pred     = match.prediction
             const isHome   = pred.winner === 'home'
-            const winner   = isHome ? match.homeTeam : match.awayTeam
             const winnerOdd = isHome ? match.odds.home : match.odds.away
             const evPct    = (pred.ev * 100).toFixed(1)
             const evGood   = pred.ev >= 0.08
@@ -340,9 +344,19 @@ export default function NBAPage() {
                       {match.odds.away.toFixed(2)}
                     </div>
                   </div>
-                  <div className="text-xs text-text-muted mt-2 flex items-center gap-1">
-                    <Clock className="w-3 h-3" />
-                    {match.date}
+                  <div className="flex items-center justify-between mt-2">
+                    <div className="text-xs text-text-muted flex items-center gap-1">
+                      <Clock className="w-3 h-3" />
+                      {match.date}
+                    </div>
+                    <div className={cn(
+                      'text-xs font-semibold px-1.5 py-0.5 rounded',
+                      (match.odds as any).source === 'rushbet'
+                        ? 'text-orange-400 bg-orange-500/10'
+                        : 'text-blue-400 bg-blue-500/10'
+                    )}>
+                      {(match.odds as any).source === 'rushbet' ? '🏦 Rushbet' : '📊 DraftKings'}
+                    </div>
                   </div>
                 </div>
 
@@ -421,17 +435,6 @@ export default function NBAPage() {
             )
           })
         )}
-      </div>
-
-      {/* Demo notice */}
-      <div className="card bg-accent/5 border-accent/10 flex items-start gap-3">
-        <TrendingUp className="w-5 h-5 text-accent flex-shrink-0 mt-0.5" />
-        <div className="text-sm text-text-muted">
-          <span className="text-text font-semibold">Datos de demostración.</span>{' '}
-          Los partidos reales se cargarán automáticamente desde el{' '}
-          <a href="/scraping-hub" className="text-accent hover:text-accent-hover font-medium">Scraping Hub</a>{' '}
-          una vez ejecutes los scrapers de estadísticas y cuotas NBA.
-        </div>
       </div>
 
       {/* Confirm modal */}

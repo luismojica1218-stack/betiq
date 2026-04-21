@@ -28,13 +28,6 @@ interface Bet {
   bookmaker:    string
 }
 
-const DEMO_BETS: Bet[] = [
-  { id: 'b1', match: 'Celtics vs Knicks',        sport: 'nba',      market: 'Moneyline',  selection: 'Boston Celtics', odd_at_bet: 1.65, amount_cop: 45000, potential_win: 74250,  status: 'won',     profit_loss:  29250, bet_week: '2026-04-07', date: '2026-04-08', bookmaker: 'rushbet' },
-  { id: 'b2', match: 'Real Madrid vs Barça',     sport: 'football', market: 'Over 2.5',   selection: 'Over',           odd_at_bet: 1.80, amount_cop: 25000, potential_win: 45000,  status: 'won',     profit_loss:  20000, bet_week: '2026-04-07', date: '2026-04-09', bookmaker: 'betplay' },
-  { id: 'b3', match: 'Lakers vs Warriors',       sport: 'nba',      market: 'Moneyline',  selection: 'LA Lakers',      odd_at_bet: 1.90, amount_cop: 30000, potential_win: 57000,  status: 'lost',    profit_loss: -30000, bet_week: '2026-04-07', date: '2026-04-09', bookmaker: 'rushbet' },
-  { id: 'b4', match: 'Djokovic vs Alcaraz',      sport: 'tennis',   market: 'Ganador',    selection: 'Djokovic',       odd_at_bet: 1.65, amount_cop: 20000, potential_win: 33000,  status: 'pending', profit_loss:       0, bet_week: '2026-04-07', date: '2026-04-11', bookmaker: 'rushbet' },
-]
-
 const LOSS_REASONS = [
   { id: 'variance',              label: '📊 Varianza normal (el modelo era correcto)' },
   { id: 'model_overconfidence',  label: '🤖 Sobreconfianza del modelo' },
@@ -84,38 +77,31 @@ export default function MisApuestasClient() {
           .catch(() => {})
 
           if (user) {
-          // Direct Supabase query to bypass API/CORS points of failure
+          // Simple query — no join to avoid PostgREST ambiguity with null match_id
           const { data: betsData, error: betsError } = await sup.from('bets')
-            .select(`*, match:matches(*)`)
+            .select('*')
             .eq('user_id', user.id)
             .order('created_at', { ascending: false })
 
-          if (betsError) {
-            console.error("Supabase bets select error:", betsError)
-          }
+          if (betsError) console.error('Supabase bets error:', betsError)
 
-          if (!betsError && betsData && betsData.length > 0) {
+          if (betsData && betsData.length > 0) {
             const mappedBets: Bet[] = betsData.map((b: any) => {
-              // Matches table raw data or fallback
-              const matchName = typeof b.match === 'string' ? b.match : 
-                 (b.match_id?.includes('demo') || !b.match_id ? 'Mi Apuesta' : 'Torneo Oficial')
-              
-              const expectedPotential = Math.round(b.amount_cop * b.odd_at_bet)
-
+              const expectedPotential = Math.round((b.amount_cop || 0) * (b.odd_at_bet || 1))
               return {
                 id: b.id,
-                match: matchName,
-                sport: b.match?.sport || 'nba',
-                market: b.market,
-                selection: b.selection,
-                odd_at_bet: b.odd_at_bet,
-                amount_cop: b.amount_cop,
+                match: b.notes || b.selection || 'Mi Apuesta',
+                sport: (b.sport || 'nba') as 'nba' | 'football' | 'tennis',
+                market: b.market || 'Moneyline',
+                selection: b.selection || '',
+                odd_at_bet: parseFloat(b.odd_at_bet) || 1,
+                amount_cop: b.amount_cop || 0,
                 potential_win: b.potential_win_cop || expectedPotential,
-                status: b.status,
+                status: b.status || 'pending',
                 profit_loss: b.profit_loss_cop || 0,
-                bet_week: b.bet_week,
-                date: b.created_at ? b.created_at.split('T')[0] : b.bet_week,
-                bookmaker: b.bookmaker
+                bet_week: b.bet_week || b.created_at?.split('T')[0] || '',
+                date: b.created_at ? b.created_at.split('T')[0] : (b.bet_week || ''),
+                bookmaker: b.bookmaker || 'rushbet'
               }
             })
             setBets(mappedBets)
@@ -194,10 +180,12 @@ export default function MisApuestasClient() {
         }).catch(() => {})
       } else {
         // Fallback or demo update
-        await supabase.from('bets').update({
-          status: 'won',
-          result_confirmed_at: new Date().toISOString(),
-        }).eq('id', betId).catch(() => {})
+        try {
+          await supabase.from('bets').update({
+            status: 'won',
+            result_confirmed_at: new Date().toISOString(),
+          }).eq('id', betId)
+        } catch { /* ignore */ }
       }
     } catch { /* local update fallback */ }
 
@@ -234,12 +222,14 @@ export default function MisApuestasClient() {
         }).catch(() => {})
 
       } else {
-        await supabase.from('bets').update({
-          status: 'lost',
-          loss_reason: lossReason,
-          result_confirmed_at: new Date().toISOString(),
-          profit_loss_cop: -(bets.find(b => b.id === lossModal.betId)?.amount_cop || 0),
-        }).eq('id', lossModal.betId).catch(() => {})
+        try {
+          await supabase.from('bets').update({
+            status: 'lost',
+            loss_reason: lossReason,
+            result_confirmed_at: new Date().toISOString(),
+            profit_loss_cop: -(bets.find(b => b.id === lossModal.betId)?.amount_cop || 0),
+          }).eq('id', lossModal.betId)
+        } catch { /* ignore */ }
       }
     } catch { /* local fallback */ }
 
@@ -427,6 +417,21 @@ export default function MisApuestasClient() {
           </div>
         </div>
 
+        {allBets.length === 0 ? (
+          <div className="card flex flex-col items-center justify-center py-14 text-center gap-4">
+            <Ticket className="w-12 h-12 text-text-muted/30" />
+            <div>
+              <p className="text-text font-semibold mb-1">No hay apuestas registradas</p>
+              <p className="text-text-muted text-sm">
+                Ve a{' '}
+                <a href="/nba" className="text-accent hover:underline">NBA</a>,{' '}
+                <a href="/futbol" className="text-accent hover:underline">Fútbol</a> o{' '}
+                <a href="/tenis" className="text-accent hover:underline">Tenis</a>{' '}
+                y presiona <strong>Agregar a Mis Apuestas</strong> en cualquier partido con EV positivo.
+              </p>
+            </div>
+          </div>
+        ) : (
         <div className="card overflow-hidden p-0">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -495,8 +500,9 @@ export default function MisApuestasClient() {
             </table>
           </div>
         </div>
+        )}
       </div>
-      
+
       {/* Loss Patterns */}
       <div className="mt-8">
         <h3 className="section-title mb-4 flex items-center gap-2">

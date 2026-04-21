@@ -17,6 +17,15 @@ const LEAGUES: Array<{ key: string; name: string; espnSlug: string }> = [
   { key: 'copa-sudamericana',name: 'Copa Sudamericana', espnSlug: 'conmebol.sudamericana'  },
 ]
 
+// ── Deterministic drift (stable odds per match across requests) ───────────────
+function stableFloat(seed: string, offset = 0): number {
+  let h = (offset + 1) * 2654435761
+  for (let i = 0; i < seed.length; i++) {
+    h = Math.imul(h ^ seed.charCodeAt(i), 2654435761)
+  }
+  return ((h >>> 0) % 10000) / 10000
+}
+
 // ── Fetch helper ──────────────────────────────────────────────────────────────
 async function espnFetch(url: string): Promise<any> {
   try {
@@ -93,7 +102,7 @@ function matchProbs(lamH: number, lamA: number) {
 }
 
 // ── Compute EV for football match ─────────────────────────────────────────────
-function computeFootball(homeQ: FootballTeamQ, awayQ: FootballTeamQ) {
+function computeFootball(homeQ: FootballTeamQ, awayQ: FootballTeamQ, matchId: string) {
   // Dixon-Coles style λ
   const lamH = Math.max(0.2, (homeQ.goalsFor  / LEAGUE_AVG) * (awayQ.goalsAgainst / LEAGUE_AVG) * LEAGUE_AVG * 1.10)
   const lamA = Math.max(0.2, (awayQ.goalsFor  / LEAGUE_AVG) * (homeQ.goalsAgainst / LEAGUE_AVG) * LEAGUE_AVG)
@@ -110,13 +119,13 @@ function computeFootball(homeQ: FootballTeamQ, awayQ: FootballTeamQ) {
   // BTTS
   const pBtts = Math.min(0.95, Math.max(0.05, (1 - poissonProb(lamH, 0)) * (1 - poissonProb(lamA, 0))))
 
-  // Market probability = model ± drift
-  const drift = () => (Math.random() - 0.45) * 0.10
-  const mktH  = Math.max(0.05, Math.min(0.88, pH  + drift()))
-  const mktD  = Math.max(0.05, Math.min(0.70, pD  + drift()))
+  // Market probability = model ± stable drift (deterministic per match)
+  const d = (n: number) => (stableFloat(matchId, n) - 0.45) * 0.10
+  const mktH  = Math.max(0.05, Math.min(0.88, pH  + d(0)))
+  const mktD  = Math.max(0.05, Math.min(0.70, pD  + d(1)))
   const mktA  = Math.max(0.05, 1 - mktH - mktD)
-  const mktOv = Math.max(0.05, Math.min(0.95, pOver25 + drift()))
-  const mktBt = Math.max(0.05, Math.min(0.95, pBtts + drift()))
+  const mktOv = Math.max(0.05, Math.min(0.95, pOver25 + d(2)))
+  const mktBt = Math.max(0.05, Math.min(0.95, pBtts + d(3)))
 
   const homeOdd  = +((1 / mktH)  * (1 - MARGIN)).toFixed(2)
   const drawOdd  = +((1 / mktD)  * (1 - MARGIN)).toFixed(2)
@@ -200,7 +209,7 @@ async function fetchLeague(league: { key: string; name: string; espnSlug: string
 
     const homeQ = findFootballQ(homeName, standingsData)
     const awayQ = findFootballQ(awayName, standingsData)
-    const calc  = computeFootball(homeQ, awayQ)
+    const calc  = computeFootball(homeQ, awayQ, e.id)
 
     matches.push({
       id:         e.id,
