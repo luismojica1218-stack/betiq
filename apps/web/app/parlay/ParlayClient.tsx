@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useMemo, useEffect } from 'react'
-import { Zap, Plus, Trash2, CheckCircle, AlertTriangle, TrendingUp, DollarSign, Loader2, X } from 'lucide-react'
+import { Zap, Plus, CheckCircle, AlertTriangle, TrendingUp, DollarSign, Loader2, X } from 'lucide-react'
 import { cn, formatCOP } from '@/lib/utils'
 import { createClient } from '@/lib/supabase/client'
 
@@ -98,40 +98,64 @@ async function fetchSport(sport: 'nba' | 'football' | 'tennis'): Promise<BetCand
       const away = m.away_team?.name || ''
       if (!home || !away) continue
 
+      // Each sport uses different field names for probabilities
+      const probHome = sport === 'football' ? pred.p_home  : pred.p1_win_prob
+      const probAway = sport === 'football' ? pred.p_away  : pred.p2_win_prob
+
       const homeOdd = m.odds?.find((o: any) => o.selection === 'home')?.odd_value
       const awayOdd = m.odds?.find((o: any) => o.selection === 'away')?.odd_value
 
-      // Home pick
-      if (homeOdd && pred.p1_win_prob != null) {
-        const ev = pred.p1_win_prob * homeOdd - 1
+      if (homeOdd && probHome != null) {
+        const ev = probHome * homeOdd - 1
         if (ev >= MIN_EV) {
           candidates.push({
             id:        `${sport}-${m.id}-home`,
             sport,
             match:     `${home} vs ${away}`,
-            market:    sport === 'tennis' ? 'Ganador partido' : 'Moneyline',
+            market:    sport === 'tennis' ? 'Ganador partido' : sport === 'football' ? '1X2' : 'Moneyline',
             selection: home,
             odd:       homeOdd,
             ev,
-            prob:      pred.p1_win_prob,
+            prob:      probHome,
             flag:      sportFlag(sport),
           })
         }
       }
-      // Away pick
-      if (awayOdd && pred.p2_win_prob != null) {
-        const ev = pred.p2_win_prob * awayOdd - 1
+      if (awayOdd && probAway != null) {
+        const ev = probAway * awayOdd - 1
         if (ev >= MIN_EV) {
           candidates.push({
             id:        `${sport}-${m.id}-away`,
             sport,
             match:     `${home} vs ${away}`,
-            market:    sport === 'tennis' ? 'Ganador partido' : 'Moneyline',
+            market:    sport === 'tennis' ? 'Ganador partido' : sport === 'football' ? '1X2' : 'Moneyline',
             selection: away,
             odd:       awayOdd,
             ev,
-            prob:      pred.p2_win_prob,
+            prob:      probAway,
             flag:      sportFlag(sport),
+          })
+        }
+      }
+
+      // Football extra: also surface over 2.5 and btts if EV positive
+      if (sport === 'football') {
+        const overOdd = m.odds?.find((o: any) => o.selection === 'over_2.5')?.odd_value
+        const bttsOdd = m.odds?.find((o: any) => o.selection === 'btts_yes')?.odd_value
+        if (overOdd && pred.p_over != null) {
+          const ev = pred.p_over * overOdd - 1
+          if (ev >= MIN_EV) candidates.push({
+            id: `${sport}-${m.id}-over`, sport, match: `${home} vs ${away}`,
+            market: 'Over 2.5', selection: 'Más de 2.5 goles',
+            odd: overOdd, ev, prob: pred.p_over, flag: sportFlag(sport),
+          })
+        }
+        if (bttsOdd && pred.p_btts != null) {
+          const ev = pred.p_btts * bttsOdd - 1
+          if (ev >= MIN_EV) candidates.push({
+            id: `${sport}-${m.id}-btts`, sport, match: `${home} vs ${away}`,
+            market: 'BTTS', selection: 'Ambos marcan',
+            odd: bttsOdd, ev, prob: pred.p_btts, flag: sportFlag(sport),
           })
         }
       }
