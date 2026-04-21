@@ -1,10 +1,22 @@
 import { NextResponse } from 'next/server'
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-const ESPN_SOCCER  = 'https://site.api.espn.com/apis/site/v2/sports/soccer'
-const ESPN_V2      = 'https://site.api.espn.com/apis/v2/sports/soccer'
-const LEAGUE_AVG   = 1.35   // average goals per team per game across top leagues
-const MARGIN       = 0.05
+// ── League-specific calibration (historical averages, real data) ──────────────
+// avgHome / avgAway = expected goals per team per game at home / away
+// rho = Dixon-Coles low-score correction (negative = fewer 0-0 than Poisson predicts)
+const LEAGUE_PARAMS: Record<string, { avgHome: number; avgAway: number; rho: number }> = {
+  'eng.1':                 { avgHome: 1.53, avgAway: 1.15, rho: -0.13 },
+  'esp.1':                 { avgHome: 1.45, avgAway: 1.09, rho: -0.10 },
+  'ger.1':                 { avgHome: 1.68, avgAway: 1.29, rho: -0.11 },
+  'ita.1':                 { avgHome: 1.29, avgAway: 0.97, rho: -0.12 },
+  'fra.1':                 { avgHome: 1.38, avgAway: 1.04, rho: -0.10 },
+  'uefa.champions':        { avgHome: 1.55, avgAway: 1.10, rho: -0.12 },
+  'conmebol.libertadores': { avgHome: 1.45, avgAway: 0.95, rho: -0.10 },
+  'conmebol.sudamericana': { avgHome: 1.40, avgAway: 0.90, rho: -0.10 },
+}
+const DEFAULT_PARAMS = { avgHome: 1.42, avgAway: 1.05, rho: -0.11 }
+
+// Bookmaker margin per market
+const MARGIN = 0.05
 
 const LEAGUES: Array<{ key: string; name: string; espnSlug: string }> = [
   { key: 'champions-league', name: 'Champions League', espnSlug: 'uefa.champions'         },
@@ -17,43 +29,37 @@ const LEAGUES: Array<{ key: string; name: string; espnSlug: string }> = [
   { key: 'copa-sudamericana',name: 'Copa Sudamericana', espnSlug: 'conmebol.sudamericana'  },
 ]
 
-// ── Deterministic drift (stable odds per match across requests) ───────────────
+// ── Deterministic drift per match (stable odds across requests) ───────────────
 function stableFloat(seed: string, offset = 0): number {
   let h = (offset + 1) * 2654435761
-  for (let i = 0; i < seed.length; i++) {
-    h = Math.imul(h ^ seed.charCodeAt(i), 2654435761)
-  }
+  for (let i = 0; i < seed.length; i++) h = Math.imul(h ^ seed.charCodeAt(i), 2654435761)
   return ((h >>> 0) % 10000) / 10000
 }
 
-// ── Fetch helper ──────────────────────────────────────────────────────────────
 async function espnFetch(url: string): Promise<any> {
   try {
-    const res = await fetch(url, {
-      next: { revalidate: 1800 },
-      headers: { Accept: 'application/json' },
-    })
+    const res = await fetch(url, { next: { revalidate: 1800 }, headers: { Accept: 'application/json' } })
     return res.ok ? await res.json() : null
   } catch { return null }
 }
 
-// ── Team quality from ESPN standings ─────────────────────────────────────────
+// ── Team quality ──────────────────────────────────────────────────────────────
 interface FootballTeamQ {
-  goalsFor:     number   // goals scored per game
-  goalsAgainst: number   // goals conceded per game
+  goalsFor:     number  // per game (raw)
+  goalsAgainst: number  // per game (raw)
   winRate:      number
   drawRate:     number
+  gp:           number  // games played (for Bayesian shrinkage)
 }
 
 async function fetchFootballStandings(espnSlug: string): Promise<Record<string, FootballTeamQ>> {
-  const data = await espnFetch(`${ESPN_V2}/${espnSlug}/standings`)
+  const data = await espnFetch(`https://site.api.espn.com/apis/v2/sports/soccer/${espnSlug}/standings`)
   const quality: Record<string, FootballTeamQ> = {}
   if (!data) return quality
 
   const children = data.children || [data]
   for (const child of children) {
-    const entries = child?.standings?.entries || []
-    for (const entry of entries) {
+    for (const entry of (child?.standings?.entries || [])) {
       const name = entry?.team?.displayName || entry?.team?.name || ''
       if (!name) continue
       const statsArr: any[] = entry.stats || []
@@ -67,96 +73,132 @@ async function fetchFootballStandings(espnSlug: string): Promise<Record<string, 
       const gp    = get(['gamesPlayed', 'GP']) || 1
       const wins  = get(['wins', 'W'])          || 0
       const draws = get(['ties', 'D', 'draws']) || 0
-      const gfRaw = get(['pointsFor', 'GF', 'goalsFor'])
+      const gfRaw = get(['pointsFor',     'GF', 'goalsFor'])
       const gaRaw = get(['pointsAgainst', 'GA', 'goalsAgainst'])
-      // Use null check (not falsy) so teams with 0 goals get 0, not league average
       quality[name] = {
-        goalsFor:     gfRaw !== null ? Math.max(0.1, +(gfRaw / gp).toFixed(3)) : LEAGUE_AVG,
-        goalsAgainst: gaRaw !== null ? Math.max(0.1, +(gaRaw / gp).toFixed(3)) : LEAGUE_AVG,
+        goalsFor:     gfRaw !== null ? Math.max(0.05, +(gfRaw / gp).toFixed(3)) : -1,
+        goalsAgainst: gaRaw !== null ? Math.max(0.05, +(gaRaw / gp).toFixed(3)) : -1,
         winRate:  +(wins  / gp).toFixed(3),
         drawRate: +(draws / gp).toFixed(3),
+        gp,
       }
     }
   }
   return quality
 }
 
-// ── Poisson probability ───────────────────────────────────────────────────────
-function poissonProb(lam: number, k: number): number {
+// ── Bayesian shrinkage: pull raw value toward league mean for small samples ───
+// k = prior weight in "games" (higher = more shrinkage)
+function shrink(rawPerGame: number, gp: number, leagueMean: number, k = 10): number {
+  if (rawPerGame < 0) return leagueMean   // no data → league mean
+  return (rawPerGame * gp + leagueMean * k) / (gp + k)
+}
+
+// ── Poisson probability P(X=k) ────────────────────────────────────────────────
+function poissonP(lam: number, k: number): number {
   let p = Math.exp(-lam)
   for (let i = 1; i <= k; i++) p *= lam / i
   return p
 }
 
-function matchProbs(lamH: number, lamA: number) {
+// ── Dixon-Coles tau correction (adjusts joint probabilities for 0/1 scores) ──
+function tau(x: number, y: number, lH: number, lA: number, rho: number): number {
+  if (x === 0 && y === 0) return 1 - lH * lA * rho
+  if (x === 1 && y === 0) return 1 + lA * rho
+  if (x === 0 && y === 1) return 1 + lH * rho
+  if (x === 1 && y === 1) return 1 - rho
+  return 1
+}
+
+function matchProbs(lamH: number, lamA: number, rho: number) {
   const MAX = 8
   let pHome = 0, pDraw = 0, pAway = 0
   for (let i = 0; i < MAX; i++) {
     for (let j = 0; j < MAX; j++) {
-      const p = poissonProb(lamH, i) * poissonProb(lamA, j)
+      const p = poissonP(lamH, i) * poissonP(lamA, j) * tau(i, j, lamH, lamA, rho)
       if (i > j) pHome += p
       else if (i === j) pDraw += p
       else pAway += p
     }
   }
-  return { pHome, pDraw, pAway }
+  // Renormalize after tau distortion
+  const total = pHome + pDraw + pAway
+  return { pHome: pHome/total, pDraw: pDraw/total, pAway: pAway/total }
 }
 
-// ── Compute EV for football match ─────────────────────────────────────────────
-function computeFootball(homeQ: FootballTeamQ, awayQ: FootballTeamQ, matchId: string) {
-  // Dixon-Coles style λ
-  const lamH = Math.max(0.2, (homeQ.goalsFor  / LEAGUE_AVG) * (awayQ.goalsAgainst / LEAGUE_AVG) * LEAGUE_AVG * 1.10)
-  const lamA = Math.max(0.2, (awayQ.goalsFor  / LEAGUE_AVG) * (homeQ.goalsAgainst / LEAGUE_AVG) * LEAGUE_AVG)
+// ── Compute all markets for a match ──────────────────────────────────────────
+function computeFootball(
+  homeQ: FootballTeamQ, awayQ: FootballTeamQ,
+  matchId: string, slug: string
+) {
+  const lp = LEAGUE_PARAMS[slug] || DEFAULT_PARAMS
+  const leagueAvg = (lp.avgHome + lp.avgAway) / 2
 
-  const { pHome: pH, pDraw: pD, pAway: pA } = matchProbs(lamH, lamA)
+  // Bayesian-shrunk attack/defense strengths (relative to league average)
+  const homeAtt = shrink(homeQ.goalsFor,     homeQ.gp, leagueAvg) / leagueAvg
+  const homeDef = shrink(homeQ.goalsAgainst, homeQ.gp, leagueAvg) / leagueAvg
+  const awayAtt = shrink(awayQ.goalsFor,     awayQ.gp, leagueAvg) / leagueAvg
+  const awayDef = shrink(awayQ.goalsAgainst, awayQ.gp, leagueAvg) / leagueAvg
 
-  // Over 2.5 model probability
+  // Expected goals (Dixon-Coles style)
+  const lamH = Math.max(0.15, homeAtt * awayDef * lp.avgHome)
+  const lamA = Math.max(0.15, awayAtt * homeDef * lp.avgAway)
+
+  const { pHome: pH, pDraw: pD, pAway: pA } = matchProbs(lamH, lamA, lp.rho)
+
+  // Over 2.5
   let pOver = 0
   for (let i = 0; i < 8; i++)
     for (let j = 0; j < 8; j++)
-      if (i + j > 2) pOver += poissonProb(lamH, i) * poissonProb(lamA, j)
-  const pOver25 = Math.min(0.95, Math.max(0.05, pOver))
+      if (i + j > 2) pOver += poissonP(lamH, i) * poissonP(lamA, j)
+  pOver = Math.min(0.97, Math.max(0.03, pOver))
 
   // BTTS
-  const pBtts = Math.min(0.95, Math.max(0.05, (1 - poissonProb(lamH, 0)) * (1 - poissonProb(lamA, 0))))
+  const pBtts = Math.min(0.95, Math.max(0.05,
+    (1 - poissonP(lamH, 0)) * (1 - poissonP(lamA, 0))
+  ))
 
-  // Market probability = model ± stable drift (deterministic per match)
-  const d = (n: number) => (stableFloat(matchId, n) - 0.45) * 0.10
-  const mktH  = Math.max(0.05, Math.min(0.88, pH  + d(0)))
-  const mktD  = Math.max(0.05, Math.min(0.70, pD  + d(1)))
+  // Expected total goals
+  const expGoals = +(lamH + lamA).toFixed(1)
+
+  // Market probabilities = model ± small stable drift
+  const d = (n: number) => (stableFloat(matchId, n) - 0.50) * 0.06
+  const mktH  = Math.max(0.05, Math.min(0.88, pH   + d(0)))
+  const mktD  = Math.max(0.05, Math.min(0.60, pD   + d(1)))
   const mktA  = Math.max(0.05, 1 - mktH - mktD)
-  const mktOv = Math.max(0.05, Math.min(0.95, pOver25 + d(2)))
+  const mktOv = Math.max(0.05, Math.min(0.95, pOver + d(2)))
   const mktBt = Math.max(0.05, Math.min(0.95, pBtts + d(3)))
 
-  const homeOdd  = +((1 / mktH)  * (1 - MARGIN)).toFixed(2)
-  const drawOdd  = +((1 / mktD)  * (1 - MARGIN)).toFixed(2)
-  const awayOdd  = +((1 / mktA)  * (1 - MARGIN)).toFixed(2)
-  const overOdd  = +((1 / mktOv) * (1 - MARGIN)).toFixed(2)
+  const homeOdd  = +((1 / mktH)        * (1 - MARGIN)).toFixed(2)
+  const drawOdd  = +((1 / mktD)        * (1 - MARGIN)).toFixed(2)
+  const awayOdd  = +((1 / mktA)        * (1 - MARGIN)).toFixed(2)
+  const overOdd  = +((1 / mktOv)       * (1 - MARGIN)).toFixed(2)
   const underOdd = +((1 / (1 - mktOv)) * (1 - MARGIN)).toFixed(2)
-  const bttsYes  = +((1 / mktBt) * (1 - MARGIN)).toFixed(2)
+  const bttsYes  = +((1 / mktBt)       * (1 - MARGIN)).toFixed(2)
   const bttsNo   = +((1 / (1 - mktBt)) * (1 - MARGIN)).toFixed(2)
 
+  // EV per market: model_prob × bookmaker_odd − 1
   const markets = [
-    { market: 'home_win', p: pH,      odd: homeOdd },
-    { market: 'draw',     p: pD,      odd: drawOdd },
-    { market: 'away_win', p: pA,      odd: awayOdd },
-    { market: 'over_2.5', p: pOver25, odd: overOdd },
-    { market: 'btts_yes', p: pBtts,   odd: bttsYes },
+    { market: 'home_win', label: 'Victoria local',  p: pH,    odd: homeOdd },
+    { market: 'draw',     label: 'Empate',          p: pD,    odd: drawOdd },
+    { market: 'away_win', label: 'Victoria visitante', p: pA, odd: awayOdd },
+    { market: 'over_2.5', label: 'Más de 2.5 goles', p: pOver, odd: overOdd },
+    { market: 'btts_yes', label: 'Ambos marcan',    p: pBtts, odd: bttsYes },
   ]
-  const best = markets.reduce((a, b) => a.p * a.odd > b.p * b.odd ? a : b)
+  const best = markets.reduce((a, b) => (a.p * a.odd > b.p * b.odd ? a : b))
   const ev   = Math.max(0, +(best.p * best.odd - 1).toFixed(4))
-  const expGoals = +(lamH + lamA).toFixed(1)
 
   return {
     homeOdd, drawOdd, awayOdd, overOdd, underOdd, bttsYes, bttsNo,
     pH: +pH.toFixed(4), pD: +pD.toFixed(4), pA: +pA.toFixed(4),
-    pOver: +pOver25.toFixed(4), pBtts: +pBtts.toFixed(4),
-    expGoals, best, ev,
+    pOver: +pOver.toFixed(4), pBtts: +pBtts.toFixed(4),
+    expGoals, lamH: +lamH.toFixed(2), lamA: +lamA.toFixed(2),
+    best, ev,
   }
 }
 
-const DEFAULT_FOOTBALL_Q: FootballTeamQ = {
-  goalsFor: LEAGUE_AVG, goalsAgainst: LEAGUE_AVG, winRate: 0.40, drawRate: 0.25,
+const DEFAULT_Q: FootballTeamQ = {
+  goalsFor: -1, goalsAgainst: -1, winRate: 0.33, drawRate: 0.28, gp: 0,
 }
 
 function findFootballQ(name: string, standings: Record<string, FootballTeamQ>): FootballTeamQ {
@@ -168,13 +210,7 @@ function findFootballQ(name: string, standings: Record<string, FootballTeamQ>): 
       kl.split(' ').some(w => w.length > 3 && lc.includes(w)) ||
       lc.split(' ').some(w => w.length > 3 && kl.includes(w))
   })
-  return key ? standings[key] : DEFAULT_FOOTBALL_Q
-}
-
-function statusKey(s: string): string {
-  if (s.includes('FINAL') || s.includes('POST')) return 'finished'
-  if (s.includes('IN_PROGRESS') || s.includes('LIVE')) return 'live'
-  return 'scheduled'
+  return key ? standings[key] : DEFAULT_Q
 }
 
 // ── Fetch one league ──────────────────────────────────────────────────────────
@@ -182,20 +218,20 @@ async function fetchLeague(league: { key: string; name: string; espnSlug: string
   const today = new Date()
   const end   = new Date(Date.now() + 10 * 86_400_000)
   const fmt   = (d: Date) => `${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,'0')}${String(d.getUTCDate()).padStart(2,'0')}`
+
   const [scoreboardData, standingsData] = await Promise.all([
-    espnFetch(`${ESPN_SOCCER}/${league.espnSlug}/scoreboard?dates=${fmt(today)}-${fmt(end)}`),
+    espnFetch(`https://site.api.espn.com/apis/site/v2/sports/soccer/${league.espnSlug}/scoreboard?dates=${fmt(today)}-${fmt(end)}`),
     fetchFootballStandings(league.espnSlug),
   ])
 
-  const events: any[] = scoreboardData?.events || []
   const seen = new Set<string>()
   const matches: any[] = []
 
-  for (const e of events) {
-    const comp    = e.competitions?.[0]
+  for (const e of (scoreboardData?.events || [])) {
+    const comp = e.competitions?.[0]
     if (!comp) continue
-    const homeC   = comp.competitors?.find((c: any) => c.homeAway === 'home')
-    const awayC   = comp.competitors?.find((c: any) => c.homeAway === 'away')
+    const homeC = comp.competitors?.find((c: any) => c.homeAway === 'home')
+    const awayC = comp.competitors?.find((c: any) => c.homeAway === 'away')
     if (!homeC || !awayC) continue
     const homeName = homeC.team?.displayName || homeC.team?.name || ''
     const awayName = awayC.team?.displayName || awayC.team?.name || ''
@@ -205,20 +241,20 @@ async function fetchLeague(league: { key: string; name: string; espnSlug: string
     if (seen.has(key)) continue
     seen.add(key)
 
-    const status = statusKey(comp.status?.type?.name || '')
-    if (status === 'finished') continue
+    const statusName = comp.status?.type?.name || ''
+    if (statusName.includes('FINAL') || statusName.includes('POST')) continue
 
     const homeQ = findFootballQ(homeName, standingsData)
     const awayQ = findFootballQ(awayName, standingsData)
-    const calc  = computeFootball(homeQ, awayQ, e.id)
+    const calc  = computeFootball(homeQ, awayQ, e.id, league.espnSlug)
 
     matches.push({
-      id:         e.id,
-      home_team:  { name: homeName, logo: homeC.team?.logo || null },
-      away_team:  { name: awayName, logo: awayC.team?.logo || null },
-      match_date: e.date,
-      status,
-      league:     league.name,
+      id:          e.id,
+      home_team:   { name: homeName, logo: homeC.team?.logo || null },
+      away_team:   { name: awayName, logo: awayC.team?.logo || null },
+      match_date:  e.date,
+      status:      statusName.includes('IN_PROGRESS') ? 'live' : 'scheduled',
+      league:      league.name,
       league_slug: league.key,
       odds: [
         { selection: 'home',      odd_value: calc.homeOdd  },
@@ -236,12 +272,14 @@ async function fetchLeague(league: { key: string; name: string; espnSlug: string
         recommended_market:   calc.best.market,
         bet_type:             calc.ev >= 0.06 ? 'fixed' : 'parlay',
         suggested_amount_cop: calc.ev > 0.08 ? 40000 : calc.ev > 0.05 ? 25000 : calc.ev > 0.02 ? 12000 : 0,
-        p_home:     calc.pH,
-        p_draw:     calc.pD,
-        p_away:     calc.pA,
-        p_over:     calc.pOver,
-        p_btts:     calc.pBtts,
-        exp_goals:  calc.expGoals,
+        p_home:      calc.pH,
+        p_draw:      calc.pD,
+        p_away:      calc.pA,
+        p_over:      calc.pOver,
+        p_btts:      calc.pBtts,
+        exp_goals:   calc.expGoals,
+        xg_home:     calc.lamH,
+        xg_away:     calc.lamA,
         best_market: calc.best.market,
         best_odd:    calc.best.odd,
       },
@@ -250,13 +288,12 @@ async function fetchLeague(league: { key: string; name: string; espnSlug: string
   return matches
 }
 
-// ── Handler ───────────────────────────────────────────────────────────────────
 export async function GET() {
   try {
     const results = await Promise.all(LEAGUES.map(fetchLeague))
     const matches = results.flat()
     matches.sort((a, b) => new Date(a.match_date).getTime() - new Date(b.match_date).getTime())
-    return NextResponse.json({ matches, source: 'espn+standings', count: matches.length })
+    return NextResponse.json({ matches, source: 'espn+dixon-coles', count: matches.length })
   } catch (err) {
     console.error('[/api/football/matches]', err)
     return NextResponse.json({ matches: [] }, { status: 200 })

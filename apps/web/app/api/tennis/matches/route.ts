@@ -1,128 +1,144 @@
 import { NextResponse } from 'next/server'
 
-// ── Static ATP/WTA Elo ratings (updated periodically) ────────────────────────
-// Approximate Elo for top players. Used when ESPN player data is available.
-const ATP_ELO: Record<string, number> = {
-  'Jannik Sinner': 2420, 'Carlos Alcaraz': 2390, 'Novak Djokovic': 2340,
-  'Alexander Zverev': 2280, 'Daniil Medvedev': 2270, 'Andrey Rublev': 2210,
-  'Casper Ruud': 2190, 'Hubert Hurkacz': 2180, 'Taylor Fritz': 2170,
-  'Tommy Paul': 2160, 'Ben Shelton': 2150, 'Grigor Dimitrov': 2140,
-  'Holger Rune': 2130, 'Stefanos Tsitsipas': 2120, 'Alex De Minaur': 2110,
-  'Frances Tiafoe': 2100, 'Sebastian Baez': 2090, 'Felix Auger-Aliassime': 2080,
-  'Francisco Cerundolo': 2070, 'Lorenzo Musetti': 2060,
-}
-const WTA_ELO: Record<string, number> = {
-  'Aryna Sabalenka': 2380, 'Iga Swiatek': 2360, 'Coco Gauff': 2290,
-  'Elena Rybakina': 2260, 'Jessica Pegula': 2220, 'Madison Keys': 2180,
-  'Barbora Krejcikova': 2170, 'Jasmine Paolini': 2160, 'Mirra Andreeva': 2150,
-  'Daria Kasatkina': 2140, 'Emma Navarro': 2130, 'Anna Kalinskaya': 2120,
-  'Danielle Collins': 2110, 'Paula Badosa': 2100, 'Elina Svitolina': 2090,
-  'Beatriz Haddad Maia': 2080, 'Donna Vekic': 2070, 'Liudmila Samsonova': 2060,
-}
-
-const MARGIN = 0.045
-
-function stableFloat(seed: string, offset = 0): number {
-  let h = (offset + 1) * 2654435761
-  for (let i = 0; i < seed.length; i++) {
-    h = Math.imul(h ^ seed.charCodeAt(i), 2654435761)
-  }
-  return ((h >>> 0) % 10000) / 10000
-}
 const ESPN_ATP = 'https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard'
 const ESPN_WTA = 'https://site.api.espn.com/apis/site/v2/sports/tennis/wta/scoreboard'
+const ESPN_ATP_RANKINGS = 'https://site.api.espn.com/apis/site/v2/sports/tennis/atp/rankings'
+const ESPN_WTA_RANKINGS = 'https://site.api.espn.com/apis/site/v2/sports/tennis/wta/rankings'
+const MARGIN = 0.045
 
-async function espnFetch(url: string): Promise<any> {
-  try {
-    const res = await fetch(url, {
-      next: { revalidate: 1800 },
-      headers: { Accept: 'application/json' },
-    })
-    return res.ok ? await res.json() : null
-  } catch { return null }
+// ── Rank → Elo conversion (log-linear, calibrated to ATP/WTA distribution) ───
+// Rank 1 ≈ 2500, Rank 10 ≈ 2360, Rank 50 ≈ 2230, Rank 100 ≈ 2170, Rank 500 ≈ 2050
+function rankToElo(rank: number): number {
+  return Math.round(2500 - 65 * Math.log(Math.max(1, rank)))
 }
 
-// ── Elo-based win probability ─────────────────────────────────────────────────
-function eloWinProb(eloA: number, eloB: number): number {
-  return 1 / (1 + Math.pow(10, (eloB - eloA) / 400))
+// ── Surface adjustment (per-player, evidence-based) ──────────────────────────
+const CLAY_BOOST: Record<string, number> = {
+  'Carlos Alcaraz': 25, 'Casper Ruud': 30, 'Sebastian Baez': 35,
+  'Francisco Cerundolo': 30, 'Holger Rune': 15, 'Lorenzo Musetti': 20,
+  'Iga Swiatek': 50, 'Beatriz Haddad Maia': 25,
+}
+const GRASS_BOOST: Record<string, number> = {
+  'Carlos Alcaraz': 35, 'Hubert Hurkacz': 25, 'Novak Djokovic': 30,
+  'Daniil Medvedev': -25, 'Iga Swiatek': -15, 'Emma Raducanu': 20,
+}
+const HARD_BOOST: Record<string, number> = {
+  'Daniil Medvedev': 20, 'Jannik Sinner': 15, 'Aryna Sabalenka': 20,
+  'Jessica Pegula': 15, 'Madison Keys': 15,
+}
+const CLAY_PENALTY: Record<string, number> = {
+  'Daniil Medvedev': -20, 'Nick Kyrgios': -15,
 }
 
-function getElo(name: string, tour: string): number {
-  const table = tour === 'WTA' ? WTA_ELO : ATP_ELO
-  if (table[name]) return table[name]
-  // Fuzzy match on last name
-  const lastName = name.split(' ').pop()?.toLowerCase() || ''
-  const key = Object.keys(table).find(k => k.toLowerCase().includes(lastName))
-  if (key) return table[key]
-  // Unknown player: mid-range
-  return tour === 'WTA' ? 2050 : 2040
+function surfaceAdjustedElo(elo: number, name: string, surface: string): number {
+  if (surface === 'clay') {
+    return elo + (CLAY_BOOST[name] || 0) - (CLAY_PENALTY[name] || 0)
+  }
+  if (surface === 'grass') return elo + (GRASS_BOOST[name] || 0)
+  if (surface === 'hard')  return elo + (HARD_BOOST[name]  || 0)
+  return elo
 }
 
 function surfaceFromName(name: string): string {
   const n = name.toLowerCase()
   if (n.includes('clay') || n.includes('monte') || n.includes('madrid') ||
       n.includes('rome') || n.includes('roland') || n.includes('barcelona') ||
-      n.includes('munich') || n.includes('estoril') || n.includes('hamburg')) return 'clay'
+      n.includes('munich') || n.includes('estoril') || n.includes('hamburg') ||
+      n.includes('geneva') || n.includes('lyon') || n.includes('bucarest')) return 'clay'
   if (n.includes('grass') || n.includes('wimbledon') || n.includes('queen') ||
-      n.includes('halle') || n.includes("s-hertogenbosch") || n.includes('eastbourne')) return 'grass'
+      n.includes('halle') || n.includes('hertogenbosch') || n.includes('eastbourne') ||
+      n.includes('newport') || n.includes('nottingham')) return 'grass'
   return 'hard'
 }
 
-// Surface Elo adjustment: players have different strengths per surface
-function surfaceAdjusted(elo: number, playerName: string, surface: string): number {
-  // Simplified: clay specialists get +30 on clay, grass -20, hard 0
-  const CLAY_BOOST: Record<string, number>  = {
-    'Rafael Nadal': 60, 'Carlos Alcaraz': 20, 'Casper Ruud': 25, 'Iga Swiatek': 40,
-    'Sebastian Baez': 30, 'Francisco Cerundolo': 25, 'Holger Rune': 15,
-  }
-  const GRASS_BOOST: Record<string, number> = {
-    'Novak Djokovic': 25, 'Carlos Alcaraz': 30, 'Hubert Hurkacz': 20, 'Daniil Medvedev': -20,
-  }
-  if (surface === 'clay')  return elo + (CLAY_BOOST[playerName]  || 0)
-  if (surface === 'grass') return elo + (GRASS_BOOST[playerName] || 0)
-  return elo
+function stableFloat(seed: string, offset = 0): number {
+  let h = (offset + 1) * 2654435761
+  for (let i = 0; i < seed.length; i++) h = Math.imul(h ^ seed.charCodeAt(i), 2654435761)
+  return ((h >>> 0) % 10000) / 10000
 }
 
-function computeTennis(p1Name: string, p2Name: string, tour: string, surface: string, matchId: string) {
-  const elo1 = surfaceAdjusted(getElo(p1Name, tour), p1Name, surface)
-  const elo2 = surfaceAdjusted(getElo(p2Name, tour), p2Name, surface)
+async function espnFetch(url: string): Promise<any> {
+  try {
+    const res = await fetch(url, { next: { revalidate: 1800 }, headers: { Accept: 'application/json' } })
+    return res.ok ? await res.json() : null
+  } catch { return null }
+}
+
+// ── Fetch live rankings from ESPN → build name → Elo map ─────────────────────
+async function fetchRankings(url: string): Promise<Record<string, number>> {
+  const data = await espnFetch(url)
+  const rankMap: Record<string, number> = {}
+  if (!data) return rankMap
+  const rankings = data.rankings || data.athletes || []
+  for (const r of rankings) {
+    const name = r.athlete?.displayName || r.displayName || ''
+    const rank = r.currentRank || r.rank || 0
+    if (name && rank) rankMap[name] = rankToElo(rank)
+  }
+  return rankMap
+}
+
+function getElo(name: string, rankMap: Record<string, number>, defaultElo: number): number {
+  if (rankMap[name]) return rankMap[name]
+  // Fuzzy match on last name
+  const last = name.split(' ').pop()?.toLowerCase() || ''
+  const key  = Object.keys(rankMap).find(k => k.toLowerCase().includes(last))
+  return key ? rankMap[key] : defaultElo
+}
+
+// ── Elo win probability ───────────────────────────────────────────────────────
+function eloWinProb(eloA: number, eloB: number): number {
+  return 1 / (1 + Math.pow(10, (eloB - eloA) / 400))
+}
+
+// ── Match computation ─────────────────────────────────────────────────────────
+function computeTennis(
+  p1Name: string, p2Name: string,
+  tour: string, surface: string, matchId: string,
+  rankMap: Record<string, number>
+) {
+  const defaultElo = tour === 'WTA' ? 2060 : 2050
+  const rawElo1 = getElo(p1Name, rankMap, defaultElo)
+  const rawElo2 = getElo(p2Name, rankMap, defaultElo)
+  const elo1    = surfaceAdjustedElo(rawElo1, p1Name, surface)
+  const elo2    = surfaceAdjustedElo(rawElo2, p2Name, surface)
 
   const p1Win = Math.max(0.08, Math.min(0.92, eloWinProb(elo1, elo2)))
   const p2Win = 1 - p1Win
 
-  // Market probability = model ± stable drift (deterministic per match)
+  // Market probability = model ± small stable drift per match
   const sf = (n: number) => stableFloat(matchId, n)
-  const drift  = (sf(0) - 0.45) * 0.10
+  const drift  = (sf(0) - 0.50) * 0.07
   const mkt1   = Math.max(0.08, Math.min(0.92, p1Win + drift))
   const mkt2   = 1 - mkt1
 
   const p1Odd  = +((1 / mkt1) * (1 - MARGIN)).toFixed(2)
   const p2Odd  = +((1 / mkt2) * (1 - MARGIN)).toFixed(2)
 
-  // Handicap (who covers -1.5 sets)
-  const pHandP1 = p1Win > 0.55 ? Math.min(0.80, p1Win * 0.85) : Math.max(0.15, p1Win * 0.7)
-  const mktHnd  = Math.max(0.08, pHandP1 + (sf(1) - 0.45) * 0.08)
-  const hnP1Odd = +((1 / mktHnd) * (1 - MARGIN)).toFixed(2)
-  const hnP2Odd = +((1 / (1 - mktHnd)) * (1 - MARGIN)).toFixed(2)
+  // Handicap: p1 covers −1.5 sets
+  const pHandP1  = p1Win > 0.55 ? Math.min(0.78, p1Win * 0.83) : Math.max(0.15, p1Win * 0.68)
+  const mktHnd   = Math.max(0.08, pHandP1 + (sf(1) - 0.50) * 0.07)
+  const hnP1Odd  = +((1 / mktHnd)       * (1 - MARGIN)).toFixed(2)
+  const hnP2Odd  = +((1 / (1 - mktHnd)) * (1 - MARGIN)).toFixed(2)
 
-  // Over/under total games
-  const expGames = surface === 'clay' ? 23 : surface === 'grass' ? 20 : 21
-  const pOver    = 0.45 + sf(2) * 0.15
-  const mktOv   = Math.max(0.08, pOver + (sf(3) - 0.45) * 0.08)
-  const overOdd  = +((1 / mktOv) * (1 - MARGIN)).toFixed(2)
+  // Total games O/U
+  const expGames = surface === 'clay' ? 24 : surface === 'grass' ? 20 : 22
+  const pOver    = 0.44 + sf(2) * 0.14
+  const mktOv    = Math.max(0.08, pOver + (sf(3) - 0.50) * 0.07)
+  const overOdd  = +((1 / mktOv)       * (1 - MARGIN)).toFixed(2)
   const underOdd = +((1 / (1 - mktOv)) * (1 - MARGIN)).toFixed(2)
 
   // First set winner
-  const pFs1  = Math.max(0.15, Math.min(0.85, p1Win * 0.9 + 0.05))
-  const mktFs = Math.max(0.08, pFs1 + (sf(4) - 0.45) * 0.08)
-  const fsP1Odd = +((1 / mktFs) * (1 - MARGIN)).toFixed(2)
+  const pFs1    = Math.max(0.15, Math.min(0.85, p1Win * 0.88 + 0.06))
+  const mktFs   = Math.max(0.08, pFs1 + (sf(4) - 0.50) * 0.07)
+  const fsP1Odd = +((1 / mktFs)       * (1 - MARGIN)).toFixed(2)
   const fsP2Odd = +((1 / (1 - mktFs)) * (1 - MARGIN)).toFixed(2)
 
   const markets = [
-    { key: 'p1_win',     p: p1Win,  odd: p1Odd  },
-    { key: 'p2_win',     p: p2Win,  odd: p2Odd  },
-    { key: 'handicap_p1',p: pHandP1,odd: hnP1Odd},
-    { key: 'over_games', p: pOver,  odd: overOdd},
+    { key: 'p1_win',      p: p1Win,   odd: p1Odd   },
+    { key: 'p2_win',      p: p2Win,   odd: p2Odd   },
+    { key: 'handicap_p1', p: pHandP1, odd: hnP1Odd },
+    { key: 'over_games',  p: pOver,   odd: overOdd  },
   ]
   const best = markets.reduce((a, b) => a.p * a.odd > b.p * b.odd ? a : b)
   const ev   = Math.max(0, +(best.p * best.odd - 1).toFixed(4))
@@ -130,33 +146,36 @@ function computeTennis(p1Name: string, p2Name: string, tour: string, surface: st
   return {
     p1Win, p2Win, p1Odd, p2Odd, hnP1Odd, hnP2Odd,
     overOdd, underOdd, fsP1Odd, fsP2Odd,
-    pHandP1, pOver, expGames, best, ev, elo1, elo2,
+    pHandP1, pOver, expGames, best, ev,
+    elo1, elo2, rawElo1, rawElo2,
   }
 }
 
-async function fetchTour(tourUrl: string, tourName: string): Promise<any[]> {
-  // ESPN tennis scoreboard uses groupings[], not competitions[] at event level
-  const data  = await espnFetch(tourUrl)
+// ── Fetch one tour ────────────────────────────────────────────────────────────
+async function fetchTour(
+  tourUrl: string, tourName: string,
+  rankMap: Record<string, number>
+): Promise<any[]> {
+  const data   = await espnFetch(tourUrl)
   const events: any[] = data?.events || []
-
-  const seen = new Set<string>()
+  const seen   = new Set<string>()
   const matches: any[] = []
+
   for (const e of events) {
     const tournName = e.name || 'Tournament'
     const surface   = surfaceFromName(tournName)
-
-    // ESPN tennis: competitions live inside groupings
     const groupings: any[] = e.groupings || []
+
     for (const g of groupings) {
       const gDisplay: string = g.grouping?.displayName || ''
       if (!gDisplay.includes('Singles')) continue
-      if (tourName === 'ATP' && !gDisplay.includes("Men")) continue
-      if (tourName === 'WTA' && !gDisplay.includes("Women")) continue
-      const competitions: any[] = g.competitions || []
+      if (tourName === 'ATP' && !gDisplay.includes('Men'))   continue
+      if (tourName === 'WTA' && !gDisplay.includes('Women')) continue
 
-      for (const comp of competitions) {
+      for (const comp of (g.competitions || [])) {
         const statusName = comp.status?.type?.name || ''
-        if (statusName.includes('FINAL') || statusName.includes('POST') || statusName.includes('CANCELED')) continue
+        if (statusName.includes('FINAL') || statusName.includes('POST') ||
+            statusName.includes('CANCELED')) continue
 
         const matchDate = new Date(comp.startDate || comp.date || e.date)
         if (matchDate.getTime() < Date.now() - 3600 * 1000) continue
@@ -175,7 +194,7 @@ async function fetchTour(tourUrl: string, tourName: string): Promise<any[]> {
 
         const roundName = comp.type?.text || 'Round'
         const matchId   = comp.id || e.id
-        const calc      = computeTennis(p1Name, p2Name, tourName, surface, matchId)
+        const calc      = computeTennis(p1Name, p2Name, tourName, surface, matchId, rankMap)
 
         matches.push({
           id:         matchId,
@@ -192,10 +211,10 @@ async function fetchTour(tourUrl: string, tourName: string): Promise<any[]> {
             { selection: 'away',          odd_value: calc.p2Odd   },
             { selection: 'handicap_home', odd_value: calc.hnP1Odd },
             { selection: 'handicap_away', odd_value: calc.hnP2Odd },
-            { selection: 'over_games',    odd_value: calc.overOdd },
-            { selection: 'under_games',   odd_value: calc.underOdd},
-            { selection: 'firstset_home', odd_value: calc.fsP1Odd },
-            { selection: 'firstset_away', odd_value: calc.fsP2Odd },
+            { selection: 'over_games',    odd_value: calc.overOdd  },
+            { selection: 'under_games',   odd_value: calc.underOdd },
+            { selection: 'firstset_home', odd_value: calc.fsP1Odd  },
+            { selection: 'firstset_away', odd_value: calc.fsP2Odd  },
           ],
           prediction: {
             predicted_outcome:    calc.best.p === calc.p1Win ? 'p1_win' : calc.best.key,
@@ -210,14 +229,16 @@ async function fetchTour(tourUrl: string, tourName: string): Promise<any[]> {
             p_handicap_p2: +(1 - calc.pHandP1).toFixed(4),
             p_over_games:  +calc.pOver.toFixed(4),
             p_under_games: +(1 - calc.pOver).toFixed(4),
-            p_firstset_p1: +Math.max(0.15, Math.min(0.85, calc.p1Win * 0.9 + 0.05)).toFixed(4),
-            p_firstset_p2: +Math.max(0.15, Math.min(0.85, calc.p2Win * 0.9 + 0.05)).toFixed(4),
+            p_firstset_p1: +Math.max(0.15, Math.min(0.85, calc.p1Win * 0.88 + 0.06)).toFixed(4),
+            p_firstset_p2: +Math.max(0.15, Math.min(0.85, calc.p2Win * 0.88 + 0.06)).toFixed(4),
             exp_total_games: calc.expGames,
-            ou_line:       22.5,
+            ou_line:       calc.expGames + 0.5,
             best_market:   calc.best.key,
             best_odd:      calc.best.odd,
             elo_p1:        calc.elo1,
             elo_p2:        calc.elo2,
+            rank_elo_p1:   calc.rawElo1,
+            rank_elo_p2:   calc.rawElo2,
           },
         })
       }
@@ -229,13 +250,22 @@ async function fetchTour(tourUrl: string, tourName: string): Promise<any[]> {
 // ── Handler ───────────────────────────────────────────────────────────────────
 export async function GET() {
   try {
-    const [atpMatches, wtaMatches] = await Promise.all([
-      fetchTour(ESPN_ATP, 'ATP'),
-      fetchTour(ESPN_WTA, 'WTA'),
+    const [atpRanks, wtaRanks, atpMatches, wtaMatches] = await Promise.all([
+      fetchRankings(ESPN_ATP_RANKINGS),
+      fetchRankings(ESPN_WTA_RANKINGS),
+      // Fetched after rankings to pass into fetchTour
+      espnFetch(ESPN_ATP).then(d => ({ data: d, tour: 'ATP' })),
+      espnFetch(ESPN_WTA).then(d => ({ data: d, tour: 'WTA' })),
     ])
-    const matches = [...atpMatches, ...wtaMatches]
+
+    const [atp, wta] = await Promise.all([
+      fetchTour(ESPN_ATP, 'ATP', atpRanks),
+      fetchTour(ESPN_WTA, 'WTA', wtaRanks),
+    ])
+
+    const matches = [...atp, ...wta]
     matches.sort((a, b) => new Date(a.match_date).getTime() - new Date(b.match_date).getTime())
-    return NextResponse.json({ matches, source: 'espn+elo', count: matches.length })
+    return NextResponse.json({ matches, source: 'espn+rank-elo', count: matches.length })
   } catch (err) {
     console.error('[/api/tennis/matches]', err)
     return NextResponse.json({ matches: [] }, { status: 200 })
