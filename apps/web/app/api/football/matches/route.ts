@@ -64,14 +64,15 @@ async function fetchFootballStandings(espnSlug: string): Promise<Record<string, 
         }
         return null
       }
-      const gp       = get(['gamesPlayed', 'GP']) || 1
-      const wins     = get(['wins', 'W'])          || 0
-      const draws    = get(['ties', 'D', 'draws']) || 0
-      const gf       = get(['pointsFor', 'GF', 'goalsFor'])       || 0
-      const ga       = get(['pointsAgainst', 'GA', 'goalsAgainst'])|| 0
+      const gp    = get(['gamesPlayed', 'GP']) || 1
+      const wins  = get(['wins', 'W'])          || 0
+      const draws = get(['ties', 'D', 'draws']) || 0
+      const gfRaw = get(['pointsFor', 'GF', 'goalsFor'])
+      const gaRaw = get(['pointsAgainst', 'GA', 'goalsAgainst'])
+      // Use null check (not falsy) so teams with 0 goals get 0, not league average
       quality[name] = {
-        goalsFor:     gf ? +(gf / gp).toFixed(3) : LEAGUE_AVG,
-        goalsAgainst: ga ? +(ga / gp).toFixed(3) : LEAGUE_AVG,
+        goalsFor:     gfRaw !== null ? Math.max(0.1, +(gfRaw / gp).toFixed(3)) : LEAGUE_AVG,
+        goalsAgainst: gaRaw !== null ? Math.max(0.1, +(gaRaw / gp).toFixed(3)) : LEAGUE_AVG,
         winRate:  +(wins  / gp).toFixed(3),
         drawRate: +(draws / gp).toFixed(3),
       }
