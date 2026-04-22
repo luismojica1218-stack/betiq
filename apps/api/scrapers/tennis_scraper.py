@@ -421,6 +421,24 @@ async def run_tennis_odds_scrape(
     source: str,
     log_queue: asyncio.Queue,
 ) -> dict:
-    scraper = RushbetTennisScraper()
-    odds    = await scraper.scrape_tennis_odds(source=source, log_queue=log_queue)
-    return {"odds": odds, "source": source, "count": len(odds)}
+    """
+    Primary source: Kambi/Rushbet API (real decimals, no Playwright).
+    Falls back to Playwright (RushbetTennisScraper) if Kambi returns 0 matches.
+    """
+    from scrapers.kambi_scraper import KambiRushbetScraper
+
+    async def log(msg: str):
+        logger.info(msg)
+        await log_queue.put({"type": "log", "message": msg})
+
+    await log("📡 Intentando Kambi/Rushbet como fuente primaria de cuotas de tenis...")
+    scraper = KambiRushbetScraper()
+    odds = await scraper.scrape_odds("tennis", log_queue=log_queue)
+
+    if not odds:
+        await log("⚠️ Kambi sin datos — intentando Playwright como fallback...")
+        playwright_scraper = RushbetTennisScraper()
+        odds = await playwright_scraper.scrape_tennis_odds(source=source, log_queue=log_queue)
+        return {"odds": odds, "source": source, "count": len(odds)}
+
+    return {"odds": odds, "source": "rushbet", "count": len(odds)}

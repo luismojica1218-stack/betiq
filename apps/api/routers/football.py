@@ -63,8 +63,7 @@ async def _run_football_stats_bg(session_id: str, league_key: str):
                 home_res = supabase.table("teams").select("id").eq("name", home_name).eq("sport", "football").execute()
                 away_res = supabase.table("teams").select("id").eq("name", away_name).eq("sport", "football").execute()
                 if home_res.data and away_res.data:
-                    existing = supabase.table("matches").select("id").eq("home_team_id", home_res.data[0]["id"]).eq("away_team_id", away_res.data[0]["id"]).eq("match_date", fx.get("match_date")).execute()
-                    if not existing.data:
+                    try:
                         supabase.table("matches").insert({
                             "sport":        "football",
                             "league":       fx.get("league", ""),
@@ -76,6 +75,8 @@ async def _run_football_stats_bg(session_id: str, league_key: str):
                             "scraped_at":   datetime.now(timezone.utc).isoformat(),
                         }).execute()
                         saved += 1
+                    except Exception:
+                        pass  # Duplicate — unique index rejects it
             except Exception:
                 pass
 
@@ -191,18 +192,22 @@ async def _run_odds_bg(session_id: str, source: str):
                         continue
                     match_id = new_match.data[0]["id"]
 
-                # Save all markets
+                # Save all markets — delete stale before inserting fresh
                 markets = [
-                    ("1X2", "home", odd.get("home_win_odd")),
+                    ("1X2", "home", odd.get("ml_home") or odd.get("home_win_odd")),
                     ("1X2", "draw", odd.get("draw_odd")),
-                    ("1X2", "away", odd.get("away_win_odd")),
+                    ("1X2", "away", odd.get("ml_away") or odd.get("away_win_odd")),
                 ]
                 for market, selection, odd_val in markets:
                     if odd_val is not None:
                         try:
+                            # Remove stale odds first
+                            supabase.table("odds").delete().eq(
+                                "match_id", match_id
+                            ).eq("market", market).eq("selection", selection).execute()
                             supabase.table("odds").insert({
                                 "match_id":   match_id,
-                                "bookmaker":  source,
+                                "bookmaker":  odd.get("bookmaker", source),
                                 "market":     market,
                                 "selection":  selection,
                                 "odd_value":  float(odd_val),
@@ -270,8 +275,20 @@ async def get_football_matches(
     matches = res.data or []
 
     for m in matches:
-        odds_res = supabase.table("odds").select("*").eq("match_id", m["id"]).execute()
-        m["odds"] = odds_res.data or []
+        # Latest odds per selection (deduplication, newest scraped_at first)
+        odds_res  = supabase.table("odds").select("*").eq(
+            "match_id", m["id"]
+        ).order("scraped_at", desc=True).execute()
+        all_odds  = odds_res.data or []
+        seen: set = set()
+        latest: list = []
+        for o in all_odds:
+            key = (o.get("market", ""), o.get("selection", ""))
+            if key not in seen:
+                seen.add(key)
+                latest.append(o)
+        m["odds"] = latest
+
         pred_res  = supabase.table("predictions").select("*").eq("match_id", m["id"]).order("created_at", desc=True).limit(1).execute()
         m["prediction"] = pred_res.data[0] if pred_res.data else None
 
@@ -326,26 +343,38 @@ async def predict_football_match(match_id: str, budget_cop: int = Query(200_000)
         raise HTTPException(404, "Match not found")
 
     match = match_res.data[0]
-    odds_res = supabase.table("odds").select("*").eq("match_id", match_id).execute()
+    odds_res = supabase.table("odds").select("*").eq(
+        "match_id", match_id
+    ).order("scraped_at", desc=True).execute()
     odds = odds_res.data or []
 
-    def find_odd(market_hint: str) -> float:
-        for o in odds:
-            if market_hint.lower() in (o.get("market") or "").lower():
+    # Deduplicate: latest per market+selection
+    seen_keys: set = set()
+    latest_odds = []
+    for o in odds:
+        key = (o.get("market", ""), o.get("selection", ""))
+        if key not in seen_keys:
+            seen_keys.add(key)
+            latest_odds.append(o)
+
+    def find_odd(selection_hint: str) -> float:
+        for o in latest_odds:
+            sel = (o.get("selection") or "").lower()
+            if selection_hint.lower() in sel:
                 return float(o["odd_value"])
         return 2.0
 
     match_data = {
-        "home_stats": {},
-        "away_stats": {},
-        "h2h":        {},
-        "home_win_odd":    find_odd("home"),
-        "draw_odd":        find_odd("draw") or 3.2,
-        "away_win_odd":    find_odd("away"),
-        "ou_over_odd":     find_odd("over") or 1.9,
-        "ou_under_odd":    find_odd("under") or 1.9,
-        "btts_yes_odd":    find_odd("btts") or 1.8,
-        "btts_no_odd":     2.0,
+        "home_stats":       {},
+        "away_stats":       {},
+        "h2h":              {},
+        "home_win_odd":     find_odd("home"),
+        "draw_odd":         find_odd("draw") or 3.2,
+        "away_win_odd":     find_odd("away"),
+        "ou_over_odd":      find_odd("over") or 1.9,
+        "ou_under_odd":     find_odd("under") or 1.9,
+        "btts_yes_odd":     find_odd("btts") or 1.8,
+        "btts_no_odd":      2.0,
         "league_avg_goals": 1.4,
         "league_strength":  0.5,
         "budget_cop":       budget_cop,

@@ -32,6 +32,8 @@ SCALER_PATH = WEIGHTS_DIR / "nba_scaler.pkl"
 FEATURES_PATH = WEIGHTS_DIR / "nba_features.pkl"
 
 # ---- Feature names ----------------------------------------------------------
+# NOTE: implied_prob_home/away intentionally excluded — including odds-derived
+# probabilities as features creates a circular dependency that collapses EV to ~0.
 FEATURE_NAMES = [
     "home_pts_per_game", "home_opp_pts_per_game", "home_fg_pct",
     "home_three_p_pct", "home_reb_per_game", "home_ast_per_game",
@@ -42,7 +44,8 @@ FEATURE_NAMES = [
     "away_last5_wins_pct", "away_away_wins_pct",
     "away_days_rest", "away_is_back_to_back",
     "h2h_home_win_pct",
-    "implied_prob_home", "implied_prob_away",
+    "net_rating_diff",   # home net_rating - away net_rating
+    "form_diff",         # home last5 - away last5
 ]
 
 
@@ -62,8 +65,19 @@ class NBAPredictor:
         """Load serialized models from disk. Returns True if successful."""
         try:
             if XGB_PATH.exists() and LGBM_PATH.exists():
-                self.xgb_model  = joblib.load(XGB_PATH)
-                self.lgbm_model = joblib.load(LGBM_PATH)
+                xgb  = joblib.load(XGB_PATH)
+                lgbm = joblib.load(LGBM_PATH)
+                # Validate feature dimension matches current FEATURE_NAMES
+                expected_n = len(FEATURE_NAMES)
+                n_feats = getattr(xgb, "n_features_in_", None)
+                if n_feats is not None and n_feats != expected_n:
+                    logger.warning(
+                        f"⚠️ NBA model weights have {n_feats} features but code expects "
+                        f"{expected_n}. Discarding stale weights — re-run /train."
+                    )
+                    return False
+                self.xgb_model  = xgb
+                self.lgbm_model = lgbm
                 self.scaler     = joblib.load(SCALER_PATH) if SCALER_PATH.exists() else None
                 self._loaded    = True
                 logger.info("✅ NBA models loaded from disk")
@@ -79,45 +93,43 @@ class NBAPredictor:
         """
         Build a feature vector from a match data dict.
         match_data keys: home_stats, away_stats, h2h, home_odd, away_odd
+        Odds are NOT used as features to avoid circular EV dependency.
         """
         h = match_data.get("home_stats", {})
         a = match_data.get("away_stats", {})
         h2h = match_data.get("h2h", {})
 
-        home_odd = match_data.get("home_odd", 2.0)
-        away_odd = match_data.get("away_odd", 2.0)
-
-        # Implied probabilities (normalised)
-        raw_home = 1 / max(home_odd, 1.01)
-        raw_away = 1 / max(away_odd, 1.01)
-        norm_total = raw_home + raw_away
-        implied_home = raw_home / norm_total
-        implied_away = raw_away / norm_total
+        h_pts  = h.get("pts_per_game", 110.0)
+        a_pts  = a.get("pts_per_game", 110.0)
+        h_opp  = h.get("opp_pts_per_game", 110.0)
+        a_opp  = a.get("opp_pts_per_game", 110.0)
+        h_l5   = h.get("last5_wins_pct", 0.5)
+        a_l5   = a.get("last5_wins_pct", 0.5)
 
         feats = [
-            h.get("pts_per_game", 110.0),
-            h.get("opp_pts_per_game", 110.0),
+            h_pts,
+            h_opp,
             h.get("fg_pct", 0.46),
             h.get("three_p_pct", 0.36),
             h.get("reb_per_game", 44.0),
             h.get("ast_per_game", 25.0),
-            h.get("last5_wins_pct", 0.5),
+            h_l5,
             h.get("home_wins_pct", 0.55),
             float(h.get("days_rest", 2)),
             float(h.get("is_back_to_back", 0)),
-            a.get("pts_per_game", 110.0),
-            a.get("opp_pts_per_game", 110.0),
+            a_pts,
+            a_opp,
             a.get("fg_pct", 0.46),
             a.get("three_p_pct", 0.36),
             a.get("reb_per_game", 44.0),
             a.get("ast_per_game", 25.0),
-            a.get("last5_wins_pct", 0.5),
+            a_l5,
             a.get("away_wins_pct", 0.45),
             float(a.get("days_rest", 2)),
             float(a.get("is_back_to_back", 0)),
             h2h.get("h2h_home_win_pct", 0.5),
-            implied_home,
-            implied_away,
+            (h_pts - h_opp) - (a_pts - a_opp),  # net_rating_diff
+            h_l5 - a_l5,                          # form_diff
         ]
         return np.array(feats, dtype=float).reshape(1, -1)
 
@@ -143,9 +155,6 @@ class NBAPredictor:
         feats = self._build_features_from_dict(match_data)
         home_odd = match_data.get("home_odd", 2.0)
         away_odd = match_data.get("away_odd", 2.0)
-        raw_home = 1 / max(home_odd, 1.01)
-        raw_away = 1 / max(away_odd, 1.01)
-        norm = raw_home + raw_away
 
         if self._loaded and self.xgb_model and self.lgbm_model:
             if self.scaler:
@@ -157,9 +166,17 @@ class NBAPredictor:
             prob_lgbm = self.lgbm_model.predict_proba(feats_scaled)[0][1]
             home_win_prob = 0.6 * prob_xgb + 0.4 * prob_lgbm
         else:
-            # Fallback: use implied probabilities + slight home advantage
-            home_win_prob = (raw_home / norm) * 1.03
-            home_win_prob = min(max(home_win_prob, 0.01), 0.99)
+            # Fallback: stats-based heuristic (no odds used — avoids circular EV)
+            h = match_data.get("home_stats", {})
+            a = match_data.get("away_stats", {})
+            net_h = h.get("pts_per_game", 110.0) - h.get("opp_pts_per_game", 110.0)
+            net_a = a.get("pts_per_game", 110.0) - a.get("opp_pts_per_game", 110.0)
+            l5_h  = h.get("last5_wins_pct", 0.5)
+            l5_a  = a.get("last5_wins_pct", 0.5)
+            # Logistic-style combination: home court ~3pt advantage
+            score = (net_h - net_a) * 0.03 + (l5_h - l5_a) * 0.6 + 0.08
+            home_win_prob = 1 / (1 + np.exp(-score))
+            home_win_prob = min(max(home_win_prob, 0.10), 0.90)
 
         away_win_prob = 1 - home_win_prob
 
@@ -263,13 +280,12 @@ class NBAPredictor:
             h_b2b    = float(h_rest == 1)
             a_b2b    = float(a_rest == 1)
             h2h      = np.random.uniform(0.3, 0.7)
-            imp_h    = np.random.uniform(0.35, 0.65)
-            imp_a    = 1 - imp_h
+            net_h    = h_pts - h_opp
+            net_a    = a_pts - a_opp
 
-            # Label: home win if overall strength and implied prob > 50%
+            # Label based purely on team quality — no odds involved
             strength = (
-                (h_pts - a_opp) * 0.3 +
-                (a_opp - a_pts) * 0.2 +
+                (net_h - net_a) * 0.4 +
                 (h_l5 - a_l5) * 20 +
                 (h_hw - 0.5) * 15 +
                 (h2h - 0.5) * 10 +
@@ -281,7 +297,7 @@ class NBAPredictor:
             feats = [
                 h_pts, h_opp, h_fg, h_3p, h_reb, h_ast, h_l5, h_hw, h_rest, h_b2b,
                 a_pts, a_opp, a_fg, a_3p, a_reb, a_ast, a_l5, a_aw, a_rest, a_b2b,
-                h2h, imp_h, imp_a,
+                h2h, net_h - net_a, h_l5 - a_l5,
             ]
             X_list.append(feats)
             y_list.append(label)

@@ -72,8 +72,7 @@ async def _run_stats_background(session_id: str):
                     home_id = home_res.data[0]["id"] if home_res.data else None
                     away_id = away_res.data[0]["id"] if away_res.data else None
                     if home_id and away_id:
-                        existing = supabase.table("matches").select("id").eq("home_team_id", home_id).eq("away_team_id", away_id).eq("match_date", game.get("match_date")).execute()
-                        if not existing.data:
+                        try:
                             supabase.table("matches").insert({
                                 "sport": "nba",
                                 "league": "NBA",
@@ -84,6 +83,8 @@ async def _run_stats_background(session_id: str):
                                 "status": "scheduled",
                                 "scraped_at": datetime.now(timezone.utc).isoformat(),
                             }).execute()
+                        except Exception:
+                            pass  # Duplicate — unique index rejects it
 
         team_stats = result.get("team_stats", {})
         stats_saved = 0
@@ -206,17 +207,21 @@ async def _run_odds_background(session_id: str):
                             if ins.data:
                                 match_id = ins.data[0]["id"]
 
-                # Save home & away odds linked to match
+                # Save home & away odds: DELETE old ones first, then insert fresh
                 scraped_at = datetime.now(timezone.utc).isoformat()
                 for selection, odd_key in [("home", "ml_home"), ("away", "ml_away")]:
                     odd_val = odd.get(odd_key)
-                    if odd_val:
+                    if odd_val and match_id:
+                        # Delete stale odds for this match+selection before inserting
+                        supabase.table("odds").delete().eq(
+                            "match_id", match_id
+                        ).eq("selection", selection).execute()
                         supabase.table("odds").insert({
-                            "match_id":  match_id,
-                            "bookmaker": odd.get("bookmaker", "rushbet"),
-                            "market":    "moneyline",
-                            "selection": selection,
-                            "odd_value": float(odd_val),
+                            "match_id":   match_id,
+                            "bookmaker":  odd.get("bookmaker", "rushbet"),
+                            "market":     "moneyline",
+                            "selection":  selection,
+                            "odd_value":  float(odd_val),
                             "scraped_at": scraped_at,
                         }).execute()
                 saved += 1
@@ -273,11 +278,27 @@ async def get_nba_matches(days_ahead: int = Query(7, ge=1, le=30)):
 
     matches = matches_res.data or []
 
-    # Enrich with odds and predictions
+    # Enrich with odds (latest per selection) and predictions
     for match in matches:
-        odds_res = supabase.table("odds").select("*").eq("match_id", match["id"]).execute()
-        match["odds"] = odds_res.data or []
-        pred_res = supabase.table("predictions").select("*").eq("match_id", match["id"]).order("created_at", desc=True).limit(1).execute()
+        # Get ALL odds for this match, ordered newest first
+        odds_res = supabase.table("odds").select("*").eq(
+            "match_id", match["id"]
+        ).order("scraped_at", desc=True).execute()
+        all_odds = odds_res.data or []
+
+        # Deduplicate: keep only the most recent odd per selection
+        seen_selections: set[str] = set()
+        latest_odds = []
+        for o in all_odds:
+            sel = (o.get("selection") or "").lower()
+            if sel not in seen_selections:
+                seen_selections.add(sel)
+                latest_odds.append(o)
+        match["odds"] = latest_odds
+
+        pred_res = supabase.table("predictions").select("*").eq(
+            "match_id", match["id"]
+        ).order("created_at", desc=True).limit(1).execute()
         match["prediction"] = pred_res.data[0] if pred_res.data else None
 
     return {"matches": matches, "count": len(matches)}
@@ -340,7 +361,7 @@ async def stream_training(session_id: str):
 
 @router.post("/predict/{match_id}")
 async def predict_match(match_id: str):
-    """Generate prediction for a specific match."""
+    """Generate prediction for a specific match using real scraped odds and stats."""
     supabase = get_supabase()
 
     match_res = supabase.table("matches").select(
@@ -351,38 +372,144 @@ async def predict_match(match_id: str):
         raise HTTPException(status_code=404, detail="Match not found")
 
     match = match_res.data[0]
+    home_team_id = match["home_team_id"]
+    away_team_id = match["away_team_id"]
 
-    # Fetch odds
-    odds_res = supabase.table("odds").select("*").eq("match_id", match_id).execute()
+    # ── 1. Fetch most recent odds (newest scraped_at wins) ──────────────────
+    odds_res = supabase.table("odds").select("*").eq(
+        "match_id", match_id
+    ).order("scraped_at", desc=True).execute()
     odds = odds_res.data or []
-    home_odd = next((o["odd_value"] for o in odds if "home" in (o.get("selection") or "").lower()), 2.0)
-    away_odd = next((o["odd_value"] for o in odds if "away" in (o.get("selection") or "").lower()), 2.0)
 
+    # Deduplicate: first home, first away after ordering by scraped_at desc = latest
+    home_odd = next((o["odd_value"] for o in odds if "home" in (o.get("selection") or "").lower()), None)
+    away_odd = next((o["odd_value"] for o in odds if "away" in (o.get("selection") or "").lower()), None)
+
+    if not home_odd or not away_odd:
+        raise HTTPException(
+            status_code=400,
+            detail="No odds available for this match. Run odds scraper first."
+        )
+
+    # ── 2. Fetch real team stats (latest entry per team) ────────────────────
+    def get_team_stats(team_id: str) -> dict:
+        res = supabase.table("team_stats").select("stats_json").eq(
+            "team_id", team_id
+        ).order("scraped_at", desc=True).limit(1).execute()
+        if res.data and res.data[0].get("stats_json"):
+            return res.data[0]["stats_json"]
+        # Neutral fallback — model handles missing features gracefully
+        return {"pts_per_game": 112.0, "opp_pts_per_game": 112.0}
+
+    home_stats = get_team_stats(home_team_id)
+    away_stats = get_team_stats(away_team_id)
+
+    # ── 3. Run prediction with real data ────────────────────────────────────
     predictor = get_predictor()
     match_data = {
-        "home_stats": {"pts_per_game": 113.0, "opp_pts_per_game": 110.0},
-        "away_stats": {"pts_per_game": 111.0, "opp_pts_per_game": 112.0},
+        "home_stats": home_stats,
+        "away_stats": away_stats,
         "h2h":        {"h2h_home_win_pct": 0.55},
         "home_odd":   float(home_odd),
         "away_odd":   float(away_odd),
     }
     prediction = predictor.predict(match_data)
 
-    # Save to DB
+    # Save to DB (replace existing prediction for this match)
+    supabase.table("predictions").delete().eq("match_id", match_id).execute()
     supabase.table("predictions").insert({
-        "match_id":         match_id,
-        "model_version":    prediction["model_version"],
-        "predicted_outcome": prediction["predicted_winner"],
-        "confidence":       prediction["confidence"],
-        "expected_value":   prediction["expected_value"],
-        "recommended_market": prediction["recommended_bet"],
-        "bet_type":         prediction["bet_type"],
-        "suggested_amount_cop": prediction["suggested_amount_cop"],
-        "features_used":    match_data,
-        "created_at":       datetime.now(timezone.utc).isoformat(),
+        "match_id":              match_id,
+        "model_version":         prediction["model_version"],
+        "predicted_outcome":     prediction["predicted_winner"],
+        "confidence":            prediction["confidence"],
+        "expected_value":        prediction["expected_value"],
+        "recommended_market":    prediction["recommended_bet"],
+        "bet_type":              prediction["bet_type"],
+        "suggested_amount_cop":  prediction["suggested_amount_cop"],
+        "features_used":         match_data,
+        "created_at":            datetime.now(timezone.utc).isoformat(),
     }).execute()
 
     return {"match_id": match_id, "prediction": prediction}
+
+
+@router.post("/predict-all")
+async def predict_all_matches(days_ahead: int = Query(14, ge=1, le=30)):
+    """Regenerate predictions for all upcoming matches that have odds. Replaces stale data."""
+    from datetime import timedelta
+    supabase = get_supabase()
+    predictor = get_predictor()
+
+    now_str = datetime.now(timezone.utc).isoformat()
+    end_str = (datetime.now(timezone.utc) + timedelta(days=days_ahead)).isoformat()
+
+    matches_res = supabase.table("matches").select(
+        "*, home_team:teams!home_team_id(*), away_team:teams!away_team_id(*)"
+    ).eq("sport", "nba").gte("match_date", now_str).lte("match_date", end_str).order("match_date").execute()
+
+    matches = matches_res.data or []
+    predicted, skipped = 0, 0
+    today = datetime.now(timezone.utc).date().isoformat()
+
+    def get_team_stats(team_id: str) -> dict:
+        res = supabase.table("team_stats").select("stats_json").eq(
+            "team_id", team_id
+        ).order("scraped_at", desc=True).limit(1).execute()
+        if res.data and res.data[0].get("stats_json"):
+            return res.data[0]["stats_json"]
+        return {"pts_per_game": 112.0, "opp_pts_per_game": 112.0}
+
+    for match in matches:
+        match_id = match["id"]
+        try:
+            odds_res = supabase.table("odds").select("*").eq(
+                "match_id", match_id
+            ).order("scraped_at", desc=True).execute()
+            odds = odds_res.data or []
+
+            home_odd = next((o["odd_value"] for o in odds if "home" in (o.get("selection") or "").lower()), None)
+            away_odd = next((o["odd_value"] for o in odds if "away" in (o.get("selection") or "").lower()), None)
+
+            if not home_odd or not away_odd:
+                skipped += 1
+                continue
+
+            home_stats = get_team_stats(match["home_team_id"])
+            away_stats = get_team_stats(match["away_team_id"])
+
+            match_data = {
+                "home_stats": home_stats,
+                "away_stats": away_stats,
+                "h2h":        {"h2h_home_win_pct": 0.55},
+                "home_odd":   float(home_odd),
+                "away_odd":   float(away_odd),
+            }
+            prediction = predictor.predict(match_data)
+
+            supabase.table("predictions").delete().eq("match_id", match_id).execute()
+            supabase.table("predictions").insert({
+                "match_id":             match_id,
+                "model_version":        prediction["model_version"],
+                "predicted_outcome":    prediction["predicted_winner"],
+                "confidence":           prediction["confidence"],
+                "expected_value":       prediction["expected_value"],
+                "recommended_market":   prediction["recommended_bet"],
+                "bet_type":             prediction["bet_type"],
+                "suggested_amount_cop": prediction["suggested_amount_cop"],
+                "features_used":        match_data,
+                "created_at":           datetime.now(timezone.utc).isoformat(),
+            }).execute()
+            predicted += 1
+        except Exception as e:
+            logger.error(f"Error predicting match {match_id}: {e}")
+            skipped += 1
+
+    return {
+        "predicted": predicted,
+        "skipped":   skipped,
+        "total":     len(matches),
+        "message":   f"✅ {predicted} predicciones regeneradas, {skipped} omitidas (sin cuotas)",
+    }
 
 
 @router.get("/predictions")

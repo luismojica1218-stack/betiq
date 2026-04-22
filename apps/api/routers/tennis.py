@@ -169,17 +169,21 @@ async def _run_odds_bg(session_id: str, source: str):
                         continue
                     match_id = new_match.data[0]["id"]
 
+                # Map Kambi keys (ml_home/ml_away) and Playwright keys (p1_odd/p2_odd)
                 markets = [
-                    ("moneyline", "home", odd.get("p1_odd")),
-                    ("moneyline", "away", odd.get("p2_odd")),
-                    ("over_under", "over_games", odd.get("ou_games_odd")),
+                    ("moneyline", "home", odd.get("ml_home") or odd.get("p1_odd")),
+                    ("moneyline", "away", odd.get("ml_away") or odd.get("p2_odd")),
                 ]
                 for market, selection, odd_val in markets:
                     if odd_val is not None:
                         try:
+                            # Delete stale before inserting fresh
+                            supabase.table("odds").delete().eq(
+                                "match_id", match_id
+                            ).eq("market", market).eq("selection", selection).execute()
                             supabase.table("odds").insert({
                                 "match_id":   match_id,
-                                "bookmaker":  source,
+                                "bookmaker":  odd.get("bookmaker", source),
                                 "market":     market,
                                 "selection":  selection,
                                 "odd_value":  float(odd_val),
@@ -245,9 +249,21 @@ async def get_tennis_matches(
     matches = res.data or []
 
     for m in matches:
-        odds_r = supabase.table("odds").select("*").eq("match_id", m["id"]).execute()
-        m["odds"] = odds_r.data or []
-        pred_r = supabase.table("predictions").select("*").eq("match_id", m["id"]).order("created_at", desc=True).limit(1).execute()
+        # Latest per selection (dedup)
+        odds_r   = supabase.table("odds").select("*").eq(
+            "match_id", m["id"]
+        ).order("scraped_at", desc=True).execute()
+        all_odds = odds_r.data or []
+        seen_s: set = set()
+        latest_odds: list = []
+        for o in all_odds:
+            key = (o.get("market", ""), o.get("selection", ""))
+            if key not in seen_s:
+                seen_s.add(key)
+                latest_odds.append(o)
+        m["odds"] = latest_odds
+
+        pred_r    = supabase.table("predictions").select("*").eq("match_id", m["id"]).order("created_at", desc=True).limit(1).execute()
         m["prediction"] = pred_r.data[0] if pred_r.data else None
 
     return {"matches": matches, "count": len(matches)}
@@ -294,12 +310,25 @@ async def predict_tennis_match(match_id: str, budget_cop: int = Query(200_000)):
         raise HTTPException(404, "Match not found")
 
     match = mr.data[0]
-    orr   = supabase.table("odds").select("*").eq("match_id", match_id).execute()
-    odds  = orr.data or []
+    orr  = supabase.table("odds").select("*").eq(
+        "match_id", match_id
+    ).order("scraped_at", desc=True).execute()
+    odds = orr.data or []
+
+    # Deduplicate: latest per market+selection
+    seen_k: set = set()
+    latest: list = []
+    for o in odds:
+        key = (o.get("market", ""), o.get("selection", ""))
+        if key not in seen_k:
+            seen_k.add(key)
+            latest.append(o)
 
     def find_odd(hint: str) -> float:
-        for o in odds:
-            if hint.lower() in (o.get("market") or "").lower() or hint.lower() in (o.get("selection") or "").lower():
+        for o in latest:
+            sel = (o.get("selection") or "").lower()
+            mkt = (o.get("market") or "").lower()
+            if hint.lower() in sel or hint.lower() in mkt:
                 return float(o["odd_value"])
         return 1.90
 

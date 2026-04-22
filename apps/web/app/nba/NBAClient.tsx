@@ -40,20 +40,27 @@ export default function NBAPage() {
                 const awayOdd = awayOddRecord?.odd_value || 1.90
                 const bookmakerSrc = homeOddRecord?.bookmaker || 'espn'
                 
+                const predWinner = pred.predicted_outcome === 'home' || (m.home_team?.name && pred.predicted_outcome === m.home_team.name) ? 'home' : 'away'
+                const predConf = pred.confidence || 0.5
+                const predOdd = predWinner === 'home' ? homeOdd : awayOdd
+                // Recalculate EV live from confidence + current odds (stored value can be null/stale)
+                const liveEV = predConf * predOdd - 1
+                const liveBetType = liveEV >= 0.08 ? 'parlay' : liveEV >= 0.05 ? 'fixed' : null
+
                 return {
                   id: m.id,
                   homeTeam: m.home_team?.name || 'Local',
                   awayTeam: m.away_team?.name || 'Visitante',
                   date: new Date(m.match_date).toLocaleString('es-CO', {day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'}),
                   status: m.status,
-                  odds: { home: homeOdd, away: awayOdd, source: bookmakerSrc },
+                  odds: { home: homeOdd, away: awayOdd, source: bookmakerSrc, realOdds: pred.real_odds ?? false },
                   prediction: {
-                    winner: pred.predicted_outcome === 'home' || (m.home_team?.name && pred.predicted_outcome === m.home_team.name) ? 'home' : 'away',
-                    prob: pred.confidence || 0.5,
-                    ev: pred.expected_value || 0,
-                    betType: pred.bet_type || 'fixed',
+                    winner: predWinner,
+                    prob: predConf,
+                    ev: liveEV,
+                    betType: liveBetType ?? (pred.bet_type || null),
                     amount: pred.suggested_amount_cop || 0,
-                    confidence: pred.confidence || 0.5
+                    confidence: predConf
                   }
                 }
              })
@@ -351,11 +358,13 @@ export default function NBAPage() {
                     </div>
                     <div className={cn(
                       'text-xs font-semibold px-1.5 py-0.5 rounded',
-                      (match.odds as any).source === 'rushbet'
-                        ? 'text-orange-400 bg-orange-500/10'
-                        : 'text-blue-400 bg-blue-500/10'
+                      (match.odds as any).realOdds
+                        ? 'text-green-400 bg-green-500/10'
+                        : 'text-text-muted bg-surface-2'
                     )}>
-                      {(match.odds as any).source === 'rushbet' ? '🏦 Rushbet' : '📊 DraftKings'}
+                      {(match.odds as any).realOdds
+                        ? `📊 ${(match.odds as any).source}`
+                        : '〜 Proyectado'}
                     </div>
                   </div>
                 </div>

@@ -547,6 +547,36 @@ async def run_football_odds_scrape(
     source: str,
     log_queue: asyncio.Queue,
 ) -> dict:
-    scraper = BetplayFootballScraper()
-    odds = await scraper.scrape_football_odds(source=source, log_queue=log_queue)
-    return {"odds": odds, "source": source, "count": len(odds)}
+    """
+    Primary source: Kambi/Rushbet API (real decimals, no Playwright).
+    Filters results to leagues configured in FOOTBALL_LEAGUES.
+    Falls back to BetplayFootballScraper (Playwright) only if Kambi returns 0 matches.
+    """
+    from scrapers.kambi_scraper import KambiRushbetScraper
+
+    async def log(msg: str):
+        logger.info(msg)
+        await log_queue.put({"type": "log", "message": msg})
+
+    await log("📡 Intentando Kambi/Rushbet como fuente primaria de cuotas de fútbol...")
+    scraper = KambiRushbetScraper()
+    all_odds = await scraper.scrape_odds("football", log_queue=log_queue)
+
+    # Filter to leagues we care about (FOOTBALL_LEAGUES names)
+    configured_names = {cfg["name"].lower() for cfg in FOOTBALL_LEAGUES.values()}
+    filtered = [
+        o for o in all_odds
+        if any(n in (o.get("league", "").lower()) for n in configured_names)
+        or not o.get("league")  # keep if no league tag
+    ]
+
+    # If Kambi has no results at all, try Playwright fallback
+    if not all_odds:
+        await log("⚠️ Kambi sin datos — intentando Playwright como fallback...")
+        playwright_scraper = BetplayFootballScraper()
+        odds = await playwright_scraper.scrape_football_odds(source=source, log_queue=log_queue)
+        return {"odds": odds, "source": source, "count": len(odds)}
+
+    odds = filtered if filtered else all_odds[:50]  # cap at 50 if no league filter matches
+    await log(f"✅ Kambi fútbol: {len(all_odds)} total → {len(odds)} de ligas configuradas")
+    return {"odds": odds, "source": "rushbet", "count": len(odds)}

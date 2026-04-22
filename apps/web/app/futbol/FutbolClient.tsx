@@ -147,7 +147,13 @@ export default function FutbolClient() {
       selection:       selectionMap[p.bestMarket] || p.bestMarket,
       suggestedOdd:    p.bestOdd,
       suggestedAmount: p.amount,
-      confidence:      Math.max(p.pHome, p.pDraw, p.pAway, p.pOver),
+      confidence:      p.bestMarket === 'home_win'   ? p.pHome :
+                       p.bestMarket === 'draw'       ? p.pDraw :
+                       p.bestMarket === 'away_win'   ? p.pAway :
+                       p.bestMarket === 'over_2.5'   ? p.pOver :
+                       p.bestMarket === 'under_2.5'  ? 1 - p.pOver :
+                       p.bestMarket === 'btts_yes'   ? p.pBtts :
+                       p.bestMarket === 'btts_no'    ? 1 - p.pBtts : p.pHome,
       expectedValue:   p.ev,
       betType:         p.betType,
     }

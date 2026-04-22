@@ -393,10 +393,167 @@ class NBAStatsScraper:
         }
 
 
+class NabaRushbetOddsScraper:
+    """
+    Scrapes NBA odds from the Naba (Kambi) public offer API — the same source
+    Rushbet uses. Returns real decimal moneyline, handicap and totals odds.
+    This is the PRIMARY source; ESPN/DraftKings is the fallback.
+    """
+
+    NABA_HEADERS = {
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Origin": "https://www.rushbet.co",
+        "Referer": "https://www.rushbet.co/",
+    }
+
+    # Kambi brand for Rushbet Colombia
+    KAMBI_BRAND = "ub"
+    KAMBI_BASE  = "https://eu-offering-api.kambicdn.com/offering/v2018"
+
+    def _normalize_team(self, raw: str) -> str:
+        """Kambi returns full team names — pass through directly."""
+        return raw.strip()
+
+    async def scrape_nba_odds(
+        self, log_queue: Optional[asyncio.Queue] = None
+    ) -> list[dict]:
+        """
+        Fetch NBA odds from Naba/Rushbet (Kambi) public API.
+        Returns list of dicts with real Rushbet decimal moneyline odds.
+        Falls back to ESPN/DraftKings if Naba is unreachable.
+        """
+        async def log(msg: str):
+            logger.info(msg)
+            if log_queue:
+                await log_queue.put({"type": "log", "message": msg})
+
+        await log("📡 NBA Odds: intentando Naba/Rushbet (Kambi API)...")
+        odds_list = await self._try_naba(log)
+
+        if odds_list:
+            await log(f"✅ Naba/Rushbet: {len(odds_list)} partidos NBA con cuotas reales")
+            return odds_list
+
+        await log("⚠️ Naba no disponible — usando ESPN/DraftKings como fallback...")
+        espn_scraper = ESPNNBAOddsScraper()
+        return await espn_scraper.scrape_nba_odds(log_queue=log_queue)
+
+    async def _try_naba(self, log) -> list[dict]:
+        """Call the Kambi offer API (brand=ub) to get real Rushbet NBA moneylines."""
+        url = (
+            f"{self.KAMBI_BASE}/{self.KAMBI_BRAND}/listView/basketball/nba.json"
+            "?lang=en_GB&market=CO&client_id=2&channel_id=1&ncid=1"
+        )
+
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                r = await client.get(url, headers=self.NABA_HEADERS)
+                if not r.is_success:
+                    logger.warning(f"Kambi Rushbet API {r.status_code} — {r.text[:100]}")
+                    return []
+                data = r.json()
+                return self._parse_kambi_response(data)
+        except Exception as e:
+            logger.warning(f"Naba/Kambi connection error: {e}")
+            return []
+
+    def _parse_kambi_response(self, data: dict) -> list[dict]:
+        """
+        Parse Kambi listView API response.
+        Structure: {events: [{event: {name, start, ...}, betOffers: [{betOfferType, outcomes: [{label, odds}]}]}]}
+        Odds are in milliodds: 1240 → 1.240 decimal.
+        """
+        results: list[dict] = []
+        today_utc = datetime.now(timezone.utc)
+
+        for ev in data.get("events", []):
+            try:
+                event = ev.get("event", ev)  # Kambi wraps in {event: {...}}
+                name  = event.get("name", "")
+
+                start_str = event.get("start") or event.get("startTime") or ""
+                try:
+                    match_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+                    if match_dt < today_utc:
+                        continue
+                except Exception:
+                    continue
+
+                # Kambi uses "Home Team - Away Team" with " - " separator
+                if " - " in name:
+                    parts = name.split(" - ", 1)
+                    home_name = self._normalize_team(parts[0])
+                    away_name = self._normalize_team(parts[1])
+                else:
+                    continue
+
+                # Find moneyline bet offer
+                bet_offers = ev.get("betOffers", [])
+                ml_home, ml_away = None, None
+
+                for offer in bet_offers:
+                    crit_label = offer.get("criterion", {}).get("label", "").lower()
+                    offer_name = offer.get("betOfferType", {}).get("name", "").lower()
+
+                    # Match offer: type="Match" with Moneyline criterion
+                    is_ml = (
+                        "moneyline" in crit_label
+                        or ("match" in offer_name and "1x2" not in crit_label)
+                    )
+                    if not is_ml:
+                        continue
+
+                    outcomes = offer.get("outcomes", [])
+                    if len(outcomes) >= 2:
+                        # Outcomes are ordered: [home, away] by Kambi convention
+                        # label contains the full team name
+                        for outcome in outcomes:
+                            label    = outcome.get("label", "")
+                            odds_val = outcome.get("odds")  # milliodds: 1240 → 1.240
+                            if odds_val is None:
+                                continue
+                            decimal_odd = round(int(odds_val) / 1000, 3)
+
+                            if home_name.lower() in label.lower() or label.lower() in home_name.lower():
+                                ml_home = decimal_odd
+                            elif away_name.lower() in label.lower() or label.lower() in away_name.lower():
+                                ml_away = decimal_odd
+
+                        # Fallback: first=home, second=away (Kambi standard)
+                        if ml_home is None and ml_away is None and len(outcomes) >= 2:
+                            ml_home = round(int(outcomes[0]["odds"]) / 1000, 3)
+                            ml_away = round(int(outcomes[1]["odds"]) / 1000, 3)
+
+                    if ml_home and ml_away:
+                        break
+
+                if ml_home and ml_away:
+                    results.append({
+                        "home_team":  home_name,
+                        "away_team":  away_name,
+                        "ml_home":    ml_home,
+                        "ml_away":    ml_away,
+                        "spread":     None,
+                        "ou_total":   None,
+                        "ou_over":    None,
+                        "ou_under":   None,
+                        "bookmaker":  "rushbet",
+                        "market":     "moneyline",
+                        "sport":      "nba",
+                        "match_date": match_dt.isoformat(),
+                    })
+
+            except Exception as e:
+                logger.debug(f"Error parsing Kambi event: {e}")
+
+        return results
+
+
 class ESPNNBAOddsScraper:
     """
     Scrapes NBA odds from the public ESPN API (DraftKings spreads + OU).
-    Replaces the Rushbet Playwright scraper which fails due to Kambi headless detection.
+    Used as FALLBACK when Naba/Rushbet (Kambi) is unavailable.
     ESPN returns: spread, over/under, and we convert American-line spread to decimal odds.
     """
 
@@ -413,13 +570,11 @@ class ESPNNBAOddsScraper:
     @staticmethod
     def _spread_to_decimal(spread: float) -> tuple[float, float]:
         """Estimate home/away decimal odds from point spread (rough approximation)."""
-        # Typical -110 juice on spread bets → 1.909 decimal
-        # Favourite: slightly less payout, underdog: slightly more
         base = 1.909
-        adjustment = abs(spread) * 0.005  # small modifier based on spread size
-        if spread < 0:  # home is favourite
+        adjustment = abs(spread) * 0.005
+        if spread < 0:
             return round(base - adjustment, 3), round(base + adjustment, 3)
-        else:            # away is favourite
+        else:
             return round(base + adjustment, 3), round(base - adjustment, 3)
 
     async def scrape_nba_odds(
@@ -427,7 +582,7 @@ class ESPNNBAOddsScraper:
     ) -> list[dict]:
         """
         Fetch NBA odds from ESPN (DraftKings) public API.
-        Returns: [{home_team, away_team, ml_home, ml_away, spread, ou_total, ou_over, ou_under, bookmaker, match_date}]
+        Returns: [{home_team, away_team, ml_home, ml_away, spread, ou_total, bookmaker, match_date}]
         """
         odds_list = []
 
@@ -436,7 +591,7 @@ class ESPNNBAOddsScraper:
             if log_queue:
                 await log_queue.put({"type": "log", "message": msg})
 
-        await log("📡 ESPN NBA Odds: consultando API pública de ESPN (DraftKings)...")
+        await log("📡 ESPN NBA Odds (fallback): consultando API pública de ESPN (DraftKings)...")
 
         today = datetime.now(timezone.utc)
         end   = today + timedelta(days=7)
@@ -466,7 +621,6 @@ class ESPNNBAOddsScraper:
                 comp = event.get("competitions", [{}])[0]
                 status_type = comp.get("status", {}).get("type", {}).get("name", "")
 
-                # Skip finished or in-progress games
                 if "FINAL" in status_type or "IN_PROGRESS" in status_type:
                     continue
 
@@ -483,35 +637,28 @@ class ESPNNBAOddsScraper:
                 if not (home_name and away_name):
                     continue
 
-                # Parse ESPN odds (DraftKings provider)
                 espn_odds = comp.get("odds", [])
                 spread_val, ou_total = None, None
                 ml_home, ml_away    = None, None
 
                 if espn_odds:
-                    o = espn_odds[0]  # First odds provider (usually DraftKings)
-                    details   = o.get("details", "")      # e.g. "BOS -7.5"
-                    ou_total  = o.get("overUnder")         # e.g. 213.5
+                    o = espn_odds[0]
+                    details    = o.get("details", "")
+                    ou_total   = o.get("overUnder")
                     ml_home_am = o.get("homeTeamOdds", {}).get("moneyLine")
                     ml_away_am = o.get("awayTeamOdds", {}).get("moneyLine")
 
-                    # Parse spread from details string (e.g. "HOU -4.5" means HOME is -4.5)
                     if details:
                         parts = details.split()
                         if len(parts) >= 2:
                             try:
-                                raw_spread = float(parts[-1])
-                                # Determine if the abbr is home or away team
+                                raw_spread  = float(parts[-1])
                                 spread_abbr = " ".join(parts[:-1]).upper()
                                 home_abbr   = home.get("team", {}).get("abbreviation", "").upper()
-                                if spread_abbr == home_abbr:
-                                    spread_val = raw_spread  # e.g. -7.5 means home is favoured
-                                else:
-                                    spread_val = -raw_spread  # flip if it's away team's favoured
+                                spread_val  = raw_spread if spread_abbr == home_abbr else -raw_spread
                             except ValueError:
                                 pass
 
-                    # Convert American ML to decimal if available
                     if ml_home_am is not None:
                         try:
                             ml_home = self._american_to_decimal(int(ml_home_am))
@@ -523,12 +670,11 @@ class ESPNNBAOddsScraper:
                         except (ValueError, TypeError):
                             pass
 
-                # If no moneyline, estimate from spread
                 if ml_home is None or ml_away is None:
                     if spread_val is not None:
                         ml_home, ml_away = self._spread_to_decimal(spread_val)
                     else:
-                        ml_home, ml_away = 1.909, 1.909  # default -110 both sides
+                        ml_home, ml_away = 1.909, 1.909
 
                 record = {
                     "home_team":  home_name,
@@ -549,12 +695,12 @@ class ESPNNBAOddsScraper:
             except Exception as e:
                 logger.debug(f"Error parsing ESPN event: {e}")
 
-        await log(f"✅ Cuotas obtenidas: {len(odds_list)} partidos NBA (ESPN/DraftKings)")
+        await log(f"✅ Cuotas obtenidas: {len(odds_list)} partidos NBA (ESPN/DraftKings fallback)")
         return odds_list
 
 
 # Keep old class name as alias so nothing else breaks
-RushbetNBAScraper = ESPNNBAOddsScraper
+RushbetNBAScraper = NabaRushbetOddsScraper
 
 
 # -------------------- Module-level convenience functions --------------------
@@ -588,7 +734,9 @@ async def run_nba_stats_scrape(log_queue: asyncio.Queue) -> dict:
 
 
 async def run_nba_odds_scrape(log_queue: asyncio.Queue) -> dict:
-    """Entry point called by the FastAPI router. Uses ESPN API (DraftKings odds)."""
-    scraper = ESPNNBAOddsScraper()
+    """Entry point called by the FastAPI router.
+    Tries Naba/Rushbet (Kambi) first, falls back to ESPN/DraftKings.
+    """
+    scraper = NabaRushbetOddsScraper()
     odds = await scraper.scrape_nba_odds(log_queue=log_queue)
     return {"odds": odds, "count": len(odds)}

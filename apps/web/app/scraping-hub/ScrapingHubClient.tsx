@@ -89,7 +89,6 @@ function LogTerminal({ logs }: { logs: LogLine[] }) {
 export default function ScrapingHubClient() {
   const [activeTab, setActiveTab] = useState<SportTab>('nba')
   const [logId, setLogId] = useState(0)
-
   const [sections, setSections] = useState<Record<string, ScrapeSection>>({
     nba_stats:      { id: 'nba_stats',      label: 'Estadísticas NBA',    status: 'idle', logs: [], count: null, lastRun: null },
     nba_odds:       { id: 'nba_odds',       label: 'Cuotas Rushbet NBA',  status: 'idle', logs: [], count: null, lastRun: null },
@@ -361,6 +360,7 @@ export default function ScrapingHubClient() {
             </div>
             <LogTerminal logs={sections.nba_train.logs} />
           </div>
+
         </div>
       )}
 
