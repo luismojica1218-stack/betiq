@@ -15,9 +15,6 @@ const LEAGUE_PARAMS: Record<string, { avgHome: number; avgAway: number; rho: num
 }
 const DEFAULT_PARAMS = { avgHome: 1.42, avgAway: 1.05, rho: -0.11 }
 
-// Bookmaker margin per market
-const MARGIN = 0.05
-
 const LEAGUES: Array<{ key: string; name: string; espnSlug: string }> = [
   { key: 'champions-league', name: 'Champions League', espnSlug: 'uefa.champions'         },
   { key: 'premier-league',   name: 'Premier League',   espnSlug: 'eng.1'                  },
@@ -28,13 +25,6 @@ const LEAGUES: Array<{ key: string; name: string; espnSlug: string }> = [
   { key: 'libertadores',     name: 'Copa Libertadores', espnSlug: 'conmebol.libertadores'  },
   { key: 'copa-sudamericana',name: 'Copa Sudamericana', espnSlug: 'conmebol.sudamericana'  },
 ]
-
-// ── Deterministic drift per match (stable odds across requests) ───────────────
-function stableFloat(seed: string, offset = 0): number {
-  let h = (offset + 1) * 2654435761
-  for (let i = 0; i < seed.length; i++) h = Math.imul(h ^ seed.charCodeAt(i), 2654435761)
-  return ((h >>> 0) % 10000) / 10000
-}
 
 async function espnFetch(url: string): Promise<any> {
   try {
@@ -126,7 +116,7 @@ function matchProbs(lamH: number, lamA: number, rho: number) {
   return { pHome: pHome/total, pDraw: pDraw/total, pAway: pAway/total }
 }
 
-// ── Compute all markets for a match ──────────────────────────────────────────
+// ── Compute all statistical insights for a match ──────────────────────────────
 function computeFootball(
   homeQ: FootballTeamQ, awayQ: FootballTeamQ,
   matchId: string, slug: string
@@ -161,42 +151,49 @@ function computeFootball(
   // Expected total goals
   const expGoals = +(lamH + lamA).toFixed(1)
 
-  // Market probabilities = model ± small stable drift
-  const d = (n: number) => (stableFloat(matchId, n) - 0.50) * 0.06
-  const mktH  = Math.max(0.05, Math.min(0.88, pH   + d(0)))
-  const mktD  = Math.max(0.05, Math.min(0.60, pD   + d(1)))
-  const mktA  = Math.max(0.05, 1 - mktH - mktD)
-  const mktOv = Math.max(0.05, Math.min(0.95, pOver + d(2)))
-  const mktBt = Math.max(0.05, Math.min(0.95, pBtts + d(3)))
+  // Most likely score (iterate 6x6 score matrix)
+  let maxScoreProb = 0, mostLikelyI = 1, mostLikelyJ = 0
+  for (let i = 0; i < 6; i++) {
+    for (let j = 0; j < 6; j++) {
+      const p = poissonP(lamH, i) * poissonP(lamA, j)
+      if (p > maxScoreProb) { maxScoreProb = p; mostLikelyI = i; mostLikelyJ = j }
+    }
+  }
+  const mostLikelyScore = `${mostLikelyI}-${mostLikelyJ}`
 
-  const homeOdd  = +((1 / mktH)        * (1 - MARGIN)).toFixed(2)
-  const drawOdd  = +((1 / mktD)        * (1 - MARGIN)).toFixed(2)
-  const awayOdd  = +((1 / mktA)        * (1 - MARGIN)).toFixed(2)
-  const overOdd  = +((1 / mktOv)       * (1 - MARGIN)).toFixed(2)
-  const underOdd = +((1 / (1 - mktOv)) * (1 - MARGIN)).toFixed(2)
-  const bttsYes  = +((1 / mktBt)       * (1 - MARGIN)).toFixed(2)
-  const bttsNo   = +((1 / (1 - mktBt)) * (1 - MARGIN)).toFixed(2)
+  // Goals range probabilities
+  let p_0_1 = 0, p_2_3 = 0, p_4_plus = 0
+  for (let i = 0; i < 8; i++) {
+    for (let j = 0; j < 8; j++) {
+      const p = poissonP(lamH, i) * poissonP(lamA, j)
+      const total = i + j
+      if (total <= 1) p_0_1 += p
+      else if (total <= 3) p_2_3 += p
+      else p_4_plus += p
+    }
+  }
 
-  // EV per market: model_prob × bookmaker_odd − 1
-  const markets = [
-    { market: 'home_win', label: 'Victoria local',  p: pH,    odd: homeOdd },
-    { market: 'draw',     label: 'Empate',          p: pD,    odd: drawOdd },
-    { market: 'away_win', label: 'Victoria visitante', p: pA, odd: awayOdd },
-    { market: 'over_2.5', label: 'Más de 2.5 goles', p: pOver, odd: overOdd },
-    { market: 'btts_yes', label: 'Ambos marcan',    p: pBtts, odd: bttsYes },
-  ]
-  // Only recommend bets with reasonable probability and odds (avoid long shots)
-  const eligible = markets.filter(m => m.p >= 0.18 && m.odd <= 5.50)
-  const pool = eligible.length > 0 ? eligible : markets.filter(m => m.p >= 0.15)
-  const best = (pool.length > 0 ? pool : markets).reduce((a, b) => (a.p * a.odd > b.p * b.odd ? a : b))
-  const ev   = Math.max(0, +(best.p * best.odd - 1).toFixed(4))
+  // Corners estimate
+  const cornersEstimate = Math.round((4.5 + (lamH + lamA) * 2.1) * 10) / 10
+
+  // Home scores first probability (proportional to lambda)
+  const homeScoresFirstPct = +(lamH / (lamH + lamA)).toFixed(4)
+
+  // Winner confidence
+  const maxProb = Math.max(pH, pD, pA)
+  const winnerConfidence = maxProb > 0.65 ? 'alta' : maxProb > 0.55 ? 'media' : 'baja'
+  const predictedWinner = pH >= pA && pH >= pD ? 'home' : pD >= pA ? 'draw' : 'away'
 
   return {
-    homeOdd, drawOdd, awayOdd, overOdd, underOdd, bttsYes, bttsNo,
     pH: +pH.toFixed(4), pD: +pD.toFixed(4), pA: +pA.toFixed(4),
     pOver: +pOver.toFixed(4), pBtts: +pBtts.toFixed(4),
     expGoals, lamH: +lamH.toFixed(2), lamA: +lamA.toFixed(2),
-    best, ev,
+    mostLikelyScore,
+    p_0_1, p_2_3, p_4_plus,
+    cornersEstimate,
+    homeScoresFirstPct,
+    winnerConfidence,
+    predictedWinner,
   }
 }
 
@@ -259,32 +256,25 @@ async function fetchLeague(league: { key: string; name: string; espnSlug: string
       status:      statusName.includes('IN_PROGRESS') ? 'live' : 'scheduled',
       league:      league.name,
       league_slug: league.key,
-      odds: [
-        { selection: 'home',      odd_value: calc.homeOdd  },
-        { selection: 'draw',      odd_value: calc.drawOdd  },
-        { selection: 'away',      odd_value: calc.awayOdd  },
-        { selection: 'over_2.5',  odd_value: calc.overOdd  },
-        { selection: 'under_2.5', odd_value: calc.underOdd },
-        { selection: 'btts_yes',  odd_value: calc.bttsYes  },
-        { selection: 'btts_no',   odd_value: calc.bttsNo   },
-      ],
       prediction: {
-        predicted_outcome:    calc.best.market,
-        confidence:           +calc.best.p.toFixed(4),
-        expected_value:       calc.ev,
-        recommended_market:   calc.best.market,
-        bet_type:             calc.ev >= 0.06 ? 'fixed' : 'parlay',
-        suggested_amount_cop: calc.ev > 0.08 ? 40000 : calc.ev > 0.05 ? 25000 : calc.ev > 0.02 ? 12000 : 0,
-        p_home:      calc.pH,
-        p_draw:      calc.pD,
-        p_away:      calc.pA,
-        p_over:      calc.pOver,
-        p_btts:      calc.pBtts,
-        exp_goals:   calc.expGoals,
-        xg_home:     calc.lamH,
-        xg_away:     calc.lamA,
-        best_market: calc.best.market,
-        best_odd:    calc.best.odd,
+        p_home: calc.pH,
+        p_draw: calc.pD,
+        p_away: calc.pA,
+        predicted_winner: calc.predictedWinner,
+        winner_confidence: calc.winnerConfidence,
+        p_over: calc.pOver,
+        p_btts: calc.pBtts,
+        exp_goals: calc.expGoals,
+        xg_home: calc.lamH,
+        xg_away: calc.lamA,
+        most_likely_score: calc.mostLikelyScore,
+        goals_range: {
+          p_0_1:    +calc.p_0_1.toFixed(4),
+          p_2_3:    +calc.p_2_3.toFixed(4),
+          p_4_plus: +calc.p_4_plus.toFixed(4),
+        },
+        corners_estimate:      calc.cornersEstimate,
+        home_scores_first_pct: calc.homeScoresFirstPct,
       },
     })
   }

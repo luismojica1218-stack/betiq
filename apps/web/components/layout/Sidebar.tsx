@@ -3,22 +3,17 @@
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import {
-  LayoutDashboard, Trophy, Globe, Dumbbell, Activity,
-  Ticket, Wallet, Settings, LogOut, Zap, ChevronRight
+  LayoutDashboard, Trophy, Globe, Dumbbell,
+  LogOut, Zap, ChevronRight
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { createClient } from '@/lib/supabase/client'
 
 const navItems = [
-  { href: '/dashboard',      label: 'Dashboard',      icon: LayoutDashboard },
-  { href: '/nba',            label: 'NBA',             icon: Trophy },
-  { href: '/futbol',         label: 'Fútbol',          icon: Globe },
-  { href: '/tenis',          label: 'Tenis',           icon: Dumbbell },
-  { href: '/scraping-hub',   label: 'Scraping Hub',    icon: Activity },
-  { href: '/mis-apuestas',   label: 'Mis Apuestas',    icon: Ticket },
-  { href: '/parlay',         label: 'Parlays',         icon: Zap },
-  { href: '/budget',         label: 'Presupuesto',     icon: Wallet },
-  { href: '/settings',       label: 'Configuración',   icon: Settings },
+  { href: '/dashboard',  label: 'Dashboard',     icon: LayoutDashboard },
+  { href: '/nba',        label: 'NBA',           icon: Trophy },
+  { href: '/futbol',     label: 'Fútbol',        icon: Globe },
+  { href: '/tenis',      label: 'Tenis ATP/WTA', icon: Dumbbell },
 ]
 
 export default function Sidebar() {
@@ -40,8 +35,8 @@ export default function Sidebar() {
             <Zap className="w-5 h-5 text-white" fill="white" />
           </div>
           <div>
-            <h1 className="text-lg font-bold text-text tracking-tight">BetIQ</h1>
-            <p className="text-xs text-text-muted">Predictions Engine</p>
+            <h1 className="text-lg font-bold text-text tracking-tight">StatIQ</h1>
+            <p className="text-xs text-text-muted">Análisis Deportivo</p>
           </div>
         </div>
       </div>

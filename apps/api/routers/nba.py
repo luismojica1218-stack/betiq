@@ -1,6 +1,7 @@
 """
-BetIQ — FastAPI Router: NBA
-Endpoints: scrape/stats, scrape/odds, matches, team stats, form, train, predict, predictions
+StatIQ — FastAPI Router: NBA
+Endpoints: scrape/stats, matches, team stats, form, train, predict, predictions
+Betting/odds endpoints removed — pure statistical insights platform.
 Uses Server-Sent Events (SSE) for real-time scraping logs.
 """
 import asyncio
@@ -15,14 +16,14 @@ logger = logging.getLogger(__name__)
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from scrapers.nba_scraper import run_nba_stats_scrape, run_nba_odds_scrape, NBAStatsScraper
+from scrapers.nba_scraper import run_nba_stats_scrape, NBAStatsScraper
 from models.nba_model import get_predictor
 from services.supabase_client import get_supabase
 
 router = APIRouter()
 
 # ---- Active scraping queues (session_id -> asyncio.Queue) ------------------
-_scraping_queues: dict[str, asyncio.Queue] = {}
+_scraping_queues: dict = {}
 
 
 async def _sse_generator(queue: asyncio.Queue, session_id: str) -> AsyncGenerator[str, None]:
@@ -36,7 +37,6 @@ async def _sse_generator(queue: asyncio.Queue, session_id: str) -> AsyncGenerato
                 if item.get("type") == "done":
                     break
             except asyncio.TimeoutError:
-                # Send heartbeat
                 yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
     finally:
         _scraping_queues.pop(session_id, None)
@@ -49,47 +49,44 @@ async def _run_stats_background(session_id: str):
     if not queue:
         return
     try:
-        result = await run_nba_stats_scrape(queue)
-        # Persist games to Supabase
+        result   = await run_nba_stats_scrape(queue)
         supabase = get_supabase()
-        games = result.get("games", [])
+        games    = result.get("games", [])
+
         if games:
-            await queue.put({"type": "log", "message": f"💾 Guardando {len(games)} partidos en Supabase..."})
-            # Upsert teams and matches
+            await queue.put({"type": "log", "message": f"Guardando {len(games)} partidos en Supabase..."})
             for game in games:
                 home_name = game.get("home_team", "")
                 away_name = game.get("away_team", "")
                 if home_name and away_name:
-                    # Upsert teams
-                    for name, sport in [(home_name, "nba"), (away_name, "nba")]:
+                    for name in [home_name, away_name]:
                         supabase.table("teams").upsert(
                             {"name": name, "sport": "nba", "league": "NBA"},
                             on_conflict="name,sport"
                         ).execute()
-                    # Get team ids
                     home_res = supabase.table("teams").select("id").eq("name", home_name).eq("sport", "nba").execute()
                     away_res = supabase.table("teams").select("id").eq("name", away_name).eq("sport", "nba").execute()
-                    home_id = home_res.data[0]["id"] if home_res.data else None
-                    away_id = away_res.data[0]["id"] if away_res.data else None
+                    home_id  = home_res.data[0]["id"] if home_res.data else None
+                    away_id  = away_res.data[0]["id"] if away_res.data else None
                     if home_id and away_id:
                         try:
                             supabase.table("matches").insert({
-                                "sport": "nba",
-                                "league": "NBA",
-                                "season": game.get("season", "2025-26"),
+                                "sport":        "nba",
+                                "league":       "NBA",
+                                "season":       game.get("season", "2025-26"),
                                 "home_team_id": home_id,
                                 "away_team_id": away_id,
-                                "match_date": game.get("match_date"),
-                                "status": "scheduled",
-                                "scraped_at": datetime.now(timezone.utc).isoformat(),
+                                "match_date":   game.get("match_date"),
+                                "status":       "scheduled",
+                                "scraped_at":   datetime.now(timezone.utc).isoformat(),
                             }).execute()
                         except Exception:
                             pass  # Duplicate — unique index rejects it
 
-        team_stats = result.get("team_stats", {})
+        team_stats  = result.get("team_stats", {})
         stats_saved = 0
         if team_stats:
-            await queue.put({"type": "log", "message": f"📊 Guardando stats de {len(team_stats)} equipos NBA (SofaScore)..."})
+            await queue.put({"type": "log", "message": f"Guardando stats de {len(team_stats)} equipos NBA..."})
             scraped_ts = datetime.now(timezone.utc).isoformat()
             for team_name, ts in team_stats.items():
                 try:
@@ -110,14 +107,14 @@ async def _run_stats_background(session_id: str):
                     pass
 
         await queue.put({
-            "type": "done",
-            "message": f"✅ Scraping NBA: {len(games)} partidos, {stats_saved} equipos con stats (SofaScore)",
-            "result": {"games_count": len(games), "teams_count": stats_saved},
+            "type":    "done",
+            "message": f"Scraping NBA: {len(games)} partidos, {stats_saved} equipos con stats",
+            "result":  {"games_count": len(games), "teams_count": stats_saved},
         })
     except Exception as e:
         if queue:
-            await queue.put({"type": "error", "message": f"❌ Error: {str(e)}"})
-            await queue.put({"type": "done", "message": "Proceso terminado con errores"})
+            await queue.put({"type": "error", "message": f"Error: {str(e)}"})
+            await queue.put({"type": "done",  "message": "Proceso terminado con errores"})
 
 
 @router.post("/scrape/stats")
@@ -139,124 +136,6 @@ async def stream_stats_scraping(session_id: str):
     return StreamingResponse(
         _sse_generator(queue, session_id),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection":    "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-# ---- Odds Scraping ----------------------------------------------------------
-
-async def _run_odds_background(session_id: str):
-    queue = _scraping_queues.get(session_id)
-    if not queue:
-        return
-    try:
-        result = await run_nba_odds_scrape(queue)
-        odds_data = result.get("odds", [])
-
-        supabase = get_supabase()
-        saved = 0
-        today = datetime.now(timezone.utc).date().isoformat()
-
-        for odd in odds_data:
-            try:
-                home_name = odd.get("home_team", "")
-                away_name = odd.get("away_team", "")
-                match_id = None
-
-                if home_name and away_name:
-                    # Upsert teams (unique constraint now exists on name+sport)
-                    for name in [home_name, away_name]:
-                        supabase.table("teams").upsert(
-                            {"name": name, "sport": "nba", "league": "NBA"},
-                            on_conflict="name,sport"
-                        ).execute()
-
-                    # Get team IDs
-                    home_res = supabase.table("teams").select("id").eq("name", home_name).eq("sport", "nba").execute()
-                    away_res = supabase.table("teams").select("id").eq("name", away_name).eq("sport", "nba").execute()
-
-                    if home_res.data and away_res.data:
-                        home_id = home_res.data[0]["id"]
-                        away_id = away_res.data[0]["id"]
-
-                        # Find existing match
-                        match_res = supabase.table("matches").select("id").eq(
-                            "home_team_id", home_id
-                        ).eq("away_team_id", away_id).eq("sport", "nba").gte(
-                            "match_date", today
-                        ).execute()
-
-                        if match_res.data:
-                            match_id = match_res.data[0]["id"]
-                        else:
-                            # Create match from odds data (no stats scraped yet)
-                            ins = supabase.table("matches").insert({
-                                "sport": "nba",
-                                "league": "NBA",
-                                "season": "2025-26",
-                                "home_team_id": home_id,
-                                "away_team_id": away_id,
-                                "match_date": datetime.now(timezone.utc).isoformat(),
-                                "status": "scheduled",
-                                "scraped_at": datetime.now(timezone.utc).isoformat(),
-                            }).execute()
-                            if ins.data:
-                                match_id = ins.data[0]["id"]
-
-                # Save home & away odds: DELETE old ones first, then insert fresh
-                scraped_at = datetime.now(timezone.utc).isoformat()
-                for selection, odd_key in [("home", "ml_home"), ("away", "ml_away")]:
-                    odd_val = odd.get(odd_key)
-                    if odd_val and match_id:
-                        # Delete stale odds for this match+selection before inserting
-                        supabase.table("odds").delete().eq(
-                            "match_id", match_id
-                        ).eq("selection", selection).execute()
-                        supabase.table("odds").insert({
-                            "match_id":   match_id,
-                            "bookmaker":  odd.get("bookmaker", "rushbet"),
-                            "market":     "moneyline",
-                            "selection":  selection,
-                            "odd_value":  float(odd_val),
-                            "scraped_at": scraped_at,
-                        }).execute()
-                saved += 1
-            except Exception as e:
-                logger.error(f"Error saving odds for {odd.get('home_team')}: {e}")
-
-        await queue.put({
-            "type": "done",
-            "message": f"✅ Cuotas guardadas: {saved}/{len(odds_data)}",
-            "result": {"odds_count": len(odds_data)},
-        })
-    except Exception as e:
-        if queue:
-            await queue.put({"type": "error", "message": f"❌ Error: {str(e)}"})
-            await queue.put({"type": "done", "message": "Proceso terminado con errores"})
-
-
-@router.post("/scrape/odds")
-async def scrape_nba_odds(background_tasks: BackgroundTasks):
-    """Trigger Rushbet odds scraping for NBA."""
-    session_id = str(uuid.uuid4())
-    queue: asyncio.Queue = asyncio.Queue()
-    _scraping_queues[session_id] = queue
-    background_tasks.add_task(_run_odds_background, session_id)
-    return {"session_id": session_id, "message": "Odds scraping iniciado"}
-
-
-@router.get("/scrape/odds/stream/{session_id}")
-async def stream_odds_scraping(session_id: str):
-    queue = _scraping_queues.get(session_id)
-    if not queue:
-        raise HTTPException(status_code=404, detail="Session not found")
-    return StreamingResponse(
-        _sse_generator(queue, session_id),
-        media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
 
@@ -265,12 +144,12 @@ async def stream_odds_scraping(session_id: str):
 
 @router.get("/matches")
 async def get_nba_matches(days_ahead: int = Query(7, ge=1, le=30)):
-    """Return upcoming NBA matches with their odds and predictions."""
-    supabase = get_supabase()
+    """Return upcoming NBA matches with their statistical predictions."""
     from datetime import timedelta
+    supabase = get_supabase()
 
-    now_str  = datetime.now(timezone.utc).isoformat()
-    end_str  = (datetime.now(timezone.utc) + timedelta(days=days_ahead)).isoformat()
+    now_str = datetime.now(timezone.utc).isoformat()
+    end_str = (datetime.now(timezone.utc) + timedelta(days=days_ahead)).isoformat()
 
     matches_res = supabase.table("matches").select(
         "*, home_team:teams!home_team_id(name, logo_url), away_team:teams!away_team_id(name, logo_url)"
@@ -278,24 +157,7 @@ async def get_nba_matches(days_ahead: int = Query(7, ge=1, le=30)):
 
     matches = matches_res.data or []
 
-    # Enrich with odds (latest per selection) and predictions
     for match in matches:
-        # Get ALL odds for this match, ordered newest first
-        odds_res = supabase.table("odds").select("*").eq(
-            "match_id", match["id"]
-        ).order("scraped_at", desc=True).execute()
-        all_odds = odds_res.data or []
-
-        # Deduplicate: keep only the most recent odd per selection
-        seen_selections: set[str] = set()
-        latest_odds = []
-        for o in all_odds:
-            sel = (o.get("selection") or "").lower()
-            if sel not in seen_selections:
-                seen_selections.add(sel)
-                latest_odds.append(o)
-        match["odds"] = latest_odds
-
         pred_res = supabase.table("predictions").select("*").eq(
             "match_id", match["id"]
         ).order("created_at", desc=True).limit(1).execute()
@@ -319,13 +181,13 @@ async def get_team_form(team_id: str, last_n: int = Query(10, ge=5, le=20)):
     team_res = supabase.table("teams").select("*").eq("id", team_id).execute()
     if not team_res.data:
         raise HTTPException(status_code=404, detail="Team not found")
-    team = team_res.data[0]
+    team        = team_res.data[0]
     external_id = team.get("external_id", "")
     if not external_id:
         return {"team": team["name"], "form": [], "message": "No external_id set for this team"}
 
     scraper = NBAStatsScraper()
-    form = await scraper.scrape_recent_form(external_id, last_n=last_n)
+    form    = await scraper.scrape_recent_form(external_id, last_n=last_n)
     return {"team": team["name"], "form": form}
 
 
@@ -361,7 +223,7 @@ async def stream_training(session_id: str):
 
 @router.post("/predict/{match_id}")
 async def predict_match(match_id: str):
-    """Generate prediction for a specific match using real scraped odds and stats."""
+    """Generate statistical prediction for a specific match using scraped team stats."""
     supabase = get_supabase()
 
     match_res = supabase.table("matches").select(
@@ -371,27 +233,11 @@ async def predict_match(match_id: str):
     if not match_res.data:
         raise HTTPException(status_code=404, detail="Match not found")
 
-    match = match_res.data[0]
+    match        = match_res.data[0]
     home_team_id = match["home_team_id"]
     away_team_id = match["away_team_id"]
 
-    # ── 1. Fetch most recent odds (newest scraped_at wins) ──────────────────
-    odds_res = supabase.table("odds").select("*").eq(
-        "match_id", match_id
-    ).order("scraped_at", desc=True).execute()
-    odds = odds_res.data or []
-
-    # Deduplicate: first home, first away after ordering by scraped_at desc = latest
-    home_odd = next((o["odd_value"] for o in odds if "home" in (o.get("selection") or "").lower()), None)
-    away_odd = next((o["odd_value"] for o in odds if "away" in (o.get("selection") or "").lower()), None)
-
-    if not home_odd or not away_odd:
-        raise HTTPException(
-            status_code=400,
-            detail="No odds available for this match. Run odds scraper first."
-        )
-
-    # ── 2. Fetch real team stats (latest entry per team) ────────────────────
+    # Fetch most recent team stats
     def get_team_stats(team_id: str) -> dict:
         res = supabase.table("team_stats").select("stats_json").eq(
             "team_id", team_id
@@ -404,30 +250,23 @@ async def predict_match(match_id: str):
     home_stats = get_team_stats(home_team_id)
     away_stats = get_team_stats(away_team_id)
 
-    # ── 3. Run prediction with real data ────────────────────────────────────
-    predictor = get_predictor()
+    predictor  = get_predictor()
     match_data = {
         "home_stats": home_stats,
         "away_stats": away_stats,
         "h2h":        {"h2h_home_win_pct": 0.55},
-        "home_odd":   float(home_odd),
-        "away_odd":   float(away_odd),
     }
     prediction = predictor.predict(match_data)
 
-    # Save to DB (replace existing prediction for this match)
+    # Save to DB — no odds/EV/Kelly fields
     supabase.table("predictions").delete().eq("match_id", match_id).execute()
     supabase.table("predictions").insert({
-        "match_id":              match_id,
-        "model_version":         prediction["model_version"],
-        "predicted_outcome":     prediction["predicted_winner"],
-        "confidence":            prediction["confidence"],
-        "expected_value":        prediction["expected_value"],
-        "recommended_market":    prediction["recommended_bet"],
-        "bet_type":              prediction["bet_type"],
-        "suggested_amount_cop":  prediction["suggested_amount_cop"],
-        "features_used":         match_data,
-        "created_at":            datetime.now(timezone.utc).isoformat(),
+        "match_id":          match_id,
+        "model_version":     prediction["model_version"],
+        "predicted_outcome": prediction["predicted_winner"],
+        "confidence":        max(prediction["home_win_prob"], prediction["away_win_prob"]),
+        "features_used":     match_data,
+        "created_at":        datetime.now(timezone.utc).isoformat(),
     }).execute()
 
     return {"match_id": match_id, "prediction": prediction}
@@ -435,9 +274,9 @@ async def predict_match(match_id: str):
 
 @router.post("/predict-all")
 async def predict_all_matches(days_ahead: int = Query(14, ge=1, le=30)):
-    """Regenerate predictions for all upcoming matches that have odds. Replaces stale data."""
+    """Regenerate statistical predictions for all upcoming matches."""
     from datetime import timedelta
-    supabase = get_supabase()
+    supabase  = get_supabase()
     predictor = get_predictor()
 
     now_str = datetime.now(timezone.utc).isoformat()
@@ -447,9 +286,8 @@ async def predict_all_matches(days_ahead: int = Query(14, ge=1, le=30)):
         "*, home_team:teams!home_team_id(*), away_team:teams!away_team_id(*)"
     ).eq("sport", "nba").gte("match_date", now_str).lte("match_date", end_str).order("match_date").execute()
 
-    matches = matches_res.data or []
+    matches            = matches_res.data or []
     predicted, skipped = 0, 0
-    today = datetime.now(timezone.utc).date().isoformat()
 
     def get_team_stats(team_id: str) -> dict:
         res = supabase.table("team_stats").select("stats_json").eq(
@@ -462,18 +300,6 @@ async def predict_all_matches(days_ahead: int = Query(14, ge=1, le=30)):
     for match in matches:
         match_id = match["id"]
         try:
-            odds_res = supabase.table("odds").select("*").eq(
-                "match_id", match_id
-            ).order("scraped_at", desc=True).execute()
-            odds = odds_res.data or []
-
-            home_odd = next((o["odd_value"] for o in odds if "home" in (o.get("selection") or "").lower()), None)
-            away_odd = next((o["odd_value"] for o in odds if "away" in (o.get("selection") or "").lower()), None)
-
-            if not home_odd or not away_odd:
-                skipped += 1
-                continue
-
             home_stats = get_team_stats(match["home_team_id"])
             away_stats = get_team_stats(match["away_team_id"])
 
@@ -481,23 +307,17 @@ async def predict_all_matches(days_ahead: int = Query(14, ge=1, le=30)):
                 "home_stats": home_stats,
                 "away_stats": away_stats,
                 "h2h":        {"h2h_home_win_pct": 0.55},
-                "home_odd":   float(home_odd),
-                "away_odd":   float(away_odd),
             }
             prediction = predictor.predict(match_data)
 
             supabase.table("predictions").delete().eq("match_id", match_id).execute()
             supabase.table("predictions").insert({
-                "match_id":             match_id,
-                "model_version":        prediction["model_version"],
-                "predicted_outcome":    prediction["predicted_winner"],
-                "confidence":           prediction["confidence"],
-                "expected_value":       prediction["expected_value"],
-                "recommended_market":   prediction["recommended_bet"],
-                "bet_type":             prediction["bet_type"],
-                "suggested_amount_cop": prediction["suggested_amount_cop"],
-                "features_used":        match_data,
-                "created_at":           datetime.now(timezone.utc).isoformat(),
+                "match_id":          match_id,
+                "model_version":     prediction["model_version"],
+                "predicted_outcome": prediction["predicted_winner"],
+                "confidence":        max(prediction["home_win_prob"], prediction["away_win_prob"]),
+                "features_used":     match_data,
+                "created_at":        datetime.now(timezone.utc).isoformat(),
             }).execute()
             predicted += 1
         except Exception as e:
@@ -508,7 +328,7 @@ async def predict_all_matches(days_ahead: int = Query(14, ge=1, le=30)):
         "predicted": predicted,
         "skipped":   skipped,
         "total":     len(matches),
-        "message":   f"✅ {predicted} predicciones regeneradas, {skipped} omitidas (sin cuotas)",
+        "message":   f"{predicted} predicciones regeneradas, {skipped} omitidas",
     }
 
 
@@ -516,8 +336,8 @@ async def predict_all_matches(days_ahead: int = Query(14, ge=1, le=30)):
 async def get_today_predictions():
     """Return all NBA predictions for today."""
     supabase = get_supabase()
-    today = datetime.now(timezone.utc).date().isoformat()
-    res = supabase.table("predictions").select(
+    today    = datetime.now(timezone.utc).date().isoformat()
+    res      = supabase.table("predictions").select(
         "*, match:matches(*, home_team:teams!home_team_id(name), away_team:teams!away_team_id(name))"
     ).gte("created_at", f"{today}T00:00:00").execute()
     return {"predictions": res.data or [], "count": len(res.data or [])}

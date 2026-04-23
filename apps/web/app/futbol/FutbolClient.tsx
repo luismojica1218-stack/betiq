@@ -1,117 +1,147 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Globe, Clock, Filter, PlusCircle, Flame, TrendingUp, Loader2 } from 'lucide-react'
-import { cn, formatCOP } from '@/lib/utils'
-import ConfirmBetModal, { type BetCandidate } from '@/components/ui/ConfirmBetModal'
+import { Globe, Clock, BarChart2, Target, TrendingUp, Loader2 } from 'lucide-react'
+import { cn } from '@/lib/utils'
 
 // ---- League config ----------------------------------------------------------
 const LEAGUES = [
-  { key: 'all',              name: 'Todas',           flag: '🌍', color: 'text-text' },
-  { key: 'premier-league',  name: 'Premier League',  flag: '🏴󠁧󠁢󠁥󠁮󠁧󠁿', color: 'text-purple-400' },
-  { key: 'la-liga',         name: 'La Liga',          flag: '🇪🇸', color: 'text-yellow-400' },
-  { key: 'bundesliga',      name: 'Bundesliga',       flag: '🇩🇪', color: 'text-red-400' },
-  { key: 'serie-a',         name: 'Serie A',          flag: '🇮🇹', color: 'text-blue-400' },
-  { key: 'ligue-1',         name: 'Ligue 1',          flag: '🇫🇷', color: 'text-sky-400' },
+  { key: 'all',               name: 'Todas',          flag: '🌍', color: 'text-text' },
+  { key: 'premier-league',   name: 'Premier League', flag: '🏴󠁧󠁢󠁥󠁮󠁧󠁿', color: 'text-purple-400' },
+  { key: 'la-liga',          name: 'La Liga',         flag: '🇪🇸', color: 'text-yellow-400' },
+  { key: 'bundesliga',       name: 'Bundesliga',      flag: '🇩🇪', color: 'text-red-400' },
+  { key: 'serie-a',          name: 'Serie A',         flag: '🇮🇹', color: 'text-blue-400' },
+  { key: 'ligue-1',          name: 'Ligue 1',         flag: '🇫🇷', color: 'text-sky-400' },
   { key: 'champions-league', name: 'Champions',       flag: '⭐', color: 'text-yellow-300' },
-  { key: 'libertadores',    name: 'Libertadores',     flag: '🌎', color: 'text-green-400' },
-  { key: 'copa-sudamericana', name: 'Sudamericana',  flag: '🏆', color: 'text-orange-400' },
-  { key: 'world-cup-2026',  name: 'Mundial 2026',     flag: '🌐', color: 'text-accent' },
+  { key: 'libertadores',     name: 'Libertadores',    flag: '🌎', color: 'text-green-400' },
+  { key: 'copa-sudamericana',name: 'Sudamericana',   flag: '🏆', color: 'text-orange-400' },
+  { key: 'world-cup-2026',   name: 'Mundial 2026',    flag: '🌐', color: 'text-accent' },
 ]
 
 // ---- Types ------------------------------------------------------------------
-type BestMarket = 'home_win' | 'draw' | 'away_win' | 'over_2.5' | 'under_2.5' | 'btts_yes' | 'btts_no'
+type AnalysisView = 'resultado' | 'goles' | 'corners'
 
-interface MatchPred {
-  pHome: number; pDraw: number; pAway: number
-  pOver: number; pBtts: number; expGoals: number
-  bestMarket: BestMarket; bestOdd: number; ev: number
-  betType: 'fixed' | 'parlay'; amount: number
+interface GoalsRange {
+  p_0_1: number
+  p_2_3: number
+  p_4_plus: number
 }
 
-// ---- Market tabs -----------------------------------------------------------
-type Market = 'moneyline' | 'over_under' | 'btts'
+interface FootballPrediction {
+  p_home: number
+  p_draw: number
+  p_away: number
+  predicted_winner: 'home' | 'draw' | 'away'
+  winner_confidence: 'alta' | 'media' | 'baja'
+  p_over: number
+  p_btts: number
+  exp_goals: number
+  xg_home: number
+  xg_away: number
+  most_likely_score: string
+  goals_range: GoalsRange
+  corners_estimate: number
+  home_scores_first_pct: number
+}
 
-function MarketBadge({ market }: { market: string }) {
-  const map: Record<string, string> = {
-    home_win: '🏠 Local', draw: '🤝 Empate', away_win: '✈️ Visitante',
-    'over_2.5': '🔥 Over 2.5', 'under_2.5': '🧊 Under 2.5',
-    btts_yes: '⚡ BTTS Sí', btts_no: '🚫 BTTS No',
+interface MappedMatch {
+  id: string
+  league: string
+  homeTeam: string
+  awayTeam: string
+  date: string
+  pred: FootballPrediction
+}
+
+// ---- Helpers ----------------------------------------------------------------
+function leagueSlug(raw: string): string {
+  const s = (raw || '').toLowerCase().replace(/\s+/g, '-')
+  if (s.includes('libertadores'))  return 'libertadores'
+  if (s.includes('sudamericana'))  return 'copa-sudamericana'
+  if (s.includes('mundial') || s.includes('world-cup') || s.includes('fifa-2026')) return 'world-cup-2026'
+  if (s.includes('champions'))     return 'champions-league'
+  if (s.includes('premier'))       return 'premier-league'
+  if (s.includes('bundesliga'))    return 'bundesliga'
+  if (s.includes('serie') && s.includes('a')) return 'serie-a'
+  if (s.includes('ligue'))         return 'ligue-1'
+  if (s.includes('liga') || s.includes('laliga')) return 'la-liga'
+  return s || 'all'
+}
+
+function ConfidenceBadge({ level }: { level: 'alta' | 'media' | 'baja' }) {
+  const map = {
+    alta:  { cls: 'badge badge-success', label: 'Confianza Alta' },
+    media: { cls: 'badge badge-warning', label: 'Confianza Media' },
+    baja:  { cls: 'badge badge-danger',  label: 'Confianza Baja' },
   }
-  return <span className="badge badge-orange">{map[market] || market}</span>
+  const { cls, label } = map[level]
+  return <span className={cls}>{label}</span>
 }
 
+function ProbBar({ label, prob, highlight, color = 'bg-football-green' }: {
+  label: string; prob: number; highlight: boolean; color?: string
+}) {
+  return (
+    <div className={cn('flex flex-col gap-1 p-2.5 rounded-lg border', highlight ? 'bg-football-green/10 border-football-green/30' : 'bg-surface-2/30 border-transparent')}>
+      <div className="flex justify-between items-center text-xs">
+        <span className={cn('font-semibold', highlight ? 'text-football-green' : 'text-text-muted')}>{label}</span>
+        <span className={cn('font-bold', highlight ? 'text-football-green' : 'text-text')}>{(prob * 100).toFixed(0)}%</span>
+      </div>
+      <div className="h-1.5 bg-surface-2 rounded-full overflow-hidden">
+        <div
+          className={cn('h-full rounded-full transition-all duration-700', highlight ? color : 'bg-surface-2')}
+          style={{ width: `${prob * 100}%`, backgroundColor: highlight ? undefined : 'rgb(var(--color-text-muted) / 0.3)' }}
+        />
+      </div>
+    </div>
+  )
+}
+
+// ---- Main component ---------------------------------------------------------
 export default function FutbolClient() {
   const [activeLeague, setActiveLeague] = useState('all')
-  const [activeMarket, setActiveMarket] = useState<Market>('moneyline')
-  const [minEV,        setMinEV]        = useState(0)
-  const [activeBet,    setActiveBet]    = useState<BetCandidate | null>(null)
-  const [confirmed,    setConfirmed]    = useState<Set<string>>(new Set())
-  const [liveMatches,  setLiveMatches]  = useState<any[]>([])
+  const [activeView,   setActiveView]   = useState<AnalysisView>('resultado')
+  const [liveMatches,  setLiveMatches]  = useState<MappedMatch[]>([])
   const [isLoading,    setIsLoading]    = useState(true)
 
   useEffect(() => {
     async function fetchMatches() {
       try {
-        const res = await fetch(`/api/football/matches`)
+        const res = await fetch('/api/football/matches')
         if (res.ok) {
           const data = await res.json()
           if (data.matches && data.matches.length > 0) {
-             // Normalize league name → slug that matches the LEAGUES tab keys
-             const leagueSlug = (raw: string) => {
-               const s = (raw || '').toLowerCase().replace(/\s+/g, '-')
-               if (s.includes('libertadores'))  return 'libertadores'
-               if (s.includes('sudamericana'))  return 'copa-sudamericana'
-               if (s.includes('mundial') || s.includes('world-cup') || s.includes('fifa-2026')) return 'world-cup-2026'
-               if (s.includes('champions'))     return 'champions-league'
-               if (s.includes('premier'))       return 'premier-league'
-               if (s.includes('bundesliga'))    return 'bundesliga'
-               if (s.includes('serie') && s.includes('a')) return 'serie-a'
-               if (s.includes('ligue'))         return 'ligue-1'
-               if (s.includes('liga') || s.includes('laliga')) return 'la-liga'
-               return s || 'all'
-             }
-
-             const mapped = data.matches.map((m: any) => {
-                const pred = m.prediction || {}
-                const odds = m.odds || []
-                const homeOdd = odds.find((o: any) => o.selection === 'home')?.odd_value || 2.10
-                const awayOdd = odds.find((o: any) => o.selection === 'away')?.odd_value || 3.30
-                const drawOdd = odds.find((o: any) => o.selection === 'draw')?.odd_value || 3.10
-                const overOdd = odds.find((o: any) => o.selection === 'over_2.5')?.odd_value || 1.90
-                const underOdd = odds.find((o: any) => o.selection === 'under_2.5')?.odd_value || 1.90
-                const bttsYes = odds.find((o: any) => o.selection === 'btts_yes')?.odd_value || 1.85
-                const bttsNo  = odds.find((o: any) => o.selection === 'btts_no')?.odd_value  || 1.85
-
-                return {
-                  id: m.id,
-                  league: leagueSlug(m.league || ''),
-                  homeTeam: m.home_team?.name || 'Local',
-                  awayTeam: m.away_team?.name || 'Visitante',
-                  date: new Date(m.match_date).toLocaleString('es-CO', {day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'}),
-                  odds:     { home: homeOdd, draw: drawOdd, away: awayOdd },
-                  ouOdds:   { over: overOdd, under: underOdd },
-                  bttsOdds: { yes: bttsYes,  no: bttsNo },
-                  pred: {
-                    pHome:      pred.p_home || pred.confidence || 0.40,
-                    pDraw:      pred.p_draw || 0.25,
-                    pAway:      pred.p_away || 0.35,
-                    pOver:      pred.p_over || 0.50,
-                    pBtts:      pred.p_btts || 0.50,
-                    expGoals:   pred.exp_goals || 2.5,
-                    bestMarket: (pred.recommended_market || pred.best_market || 'home_win') as BestMarket,
-                    bestOdd:    pred.best_odd || homeOdd,
-                    ev:         pred.expected_value || 0,
-                    betType:    (pred.bet_type || 'fixed') as 'fixed' | 'parlay',
-                    amount:     pred.suggested_amount_cop || 0,
-                  }
-                }
-             })
-             setLiveMatches(mapped)
+            const mapped: MappedMatch[] = data.matches.map((m: any) => {
+              const pred = m.prediction || {}
+              return {
+                id: m.id,
+                league: leagueSlug(m.league || ''),
+                homeTeam: m.home_team?.name || 'Local',
+                awayTeam: m.away_team?.name || 'Visitante',
+                date: new Date(m.match_date).toLocaleString('es-CO', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }),
+                pred: {
+                  p_home:               pred.p_home ?? 0.40,
+                  p_draw:               pred.p_draw ?? 0.25,
+                  p_away:               pred.p_away ?? 0.35,
+                  predicted_winner:     pred.predicted_winner ?? 'home',
+                  winner_confidence:    pred.winner_confidence ?? 'baja',
+                  p_over:               pred.p_over ?? 0.50,
+                  p_btts:               pred.p_btts ?? 0.50,
+                  exp_goals:            pred.exp_goals ?? 2.5,
+                  xg_home:              pred.xg_home ?? 1.2,
+                  xg_away:              pred.xg_away ?? 1.1,
+                  most_likely_score:    pred.most_likely_score ?? '1-0',
+                  goals_range:          pred.goals_range ?? { p_0_1: 0.25, p_2_3: 0.50, p_4_plus: 0.25 },
+                  corners_estimate:     pred.corners_estimate ?? 9.5,
+                  home_scores_first_pct: pred.home_scores_first_pct ?? 0.55,
+                },
+              }
+            })
+            setLiveMatches(mapped)
           }
         }
       } catch (err) {
-        console.error("No real stats. Falling back to mocks.")
+        console.error('Football fetch error', err)
       } finally {
         setIsLoading(false)
       }
@@ -119,44 +149,14 @@ export default function FutbolClient() {
     fetchMatches()
   }, [])
 
-  const filtered = liveMatches.filter(m => {
-    if (activeLeague !== 'all' && m.league !== activeLeague) return false
-    // Only apply EV filter to matches that actually have a predicted EV (scraped matches without predictions always show)
-    if (m.pred.ev > 0 && m.pred.ev * 100 < minEV) return false
-    return true
-  })
+  const filtered = liveMatches.filter(m =>
+    activeLeague === 'all' || m.league === activeLeague
+  )
 
-  function buildBetCandidate(match: any): BetCandidate {
-    const p = match.pred
-    const selectionMap: Record<string, string> = {
-      home_win:   `${match.homeTeam} gana (1)`,
-      draw:       'Empate (X)',
-      away_win:   `${match.awayTeam} gana (2)`,
-      'over_2.5': 'Más de 2.5 goles',
-      'under_2.5': 'Menos de 2.5 goles',
-      btts_yes:   'Ambos equipos marcan',
-      btts_no:    'No marcan ambos',
-    }
-    return {
-      matchId:         match.id,
-      homeTeam:        match.homeTeam,
-      awayTeam:        match.awayTeam,
-      sport:           'football',
-      market:          p.bestMarket.includes('over') || p.bestMarket.includes('under') ? 'Over/Under' :
-                       p.bestMarket.includes('btts') ? 'BTTS' : '1X2',
-      selection:       selectionMap[p.bestMarket] || p.bestMarket,
-      suggestedOdd:    p.bestOdd,
-      suggestedAmount: p.amount,
-      confidence:      p.bestMarket === 'home_win'   ? p.pHome :
-                       p.bestMarket === 'draw'       ? p.pDraw :
-                       p.bestMarket === 'away_win'   ? p.pAway :
-                       p.bestMarket === 'over_2.5'   ? p.pOver :
-                       p.bestMarket === 'under_2.5'  ? 1 - p.pOver :
-                       p.bestMarket === 'btts_yes'   ? p.pBtts :
-                       p.bestMarket === 'btts_no'    ? 1 - p.pBtts : p.pHome,
-      expectedValue:   p.ev,
-      betType:         p.betType,
-    }
+  const winnerLabel = (w: 'home' | 'draw' | 'away', homeTeam: string, awayTeam: string) => {
+    if (w === 'home') return `Local (${homeTeam})`
+    if (w === 'away') return `Visitante (${awayTeam})`
+    return 'Empate'
   }
 
   return (
@@ -166,17 +166,19 @@ export default function FutbolClient() {
         <div>
           <h2 className="text-2xl font-bold text-text flex items-center gap-3">
             <Globe className="w-6 h-6 text-football-green" />
-            Fútbol — Predicciones Multi-mercado
+            Fútbol — Análisis Estadístico
           </h2>
-          <p className="text-text-muted text-sm mt-1">1X2 · Over/Under · BTTS · Valores esperados con Poisson + XGBoost</p>
+          <p className="text-text-muted text-sm mt-1">
+            Probabilidades de resultado · xG · Goles esperados · Córners — Modelos Poisson + XGBoost
+          </p>
         </div>
         <div className="flex items-center gap-2 text-xs text-text-muted bg-surface-2 px-3 py-2 rounded-lg">
           <Clock className="w-3.5 h-3.5" />
-          Scraped hace 5 min
+          Actualizado hace 5 min
         </div>
       </div>
 
-      {/* League scrollable tabs */}
+      {/* League tabs */}
       <div className="overflow-x-auto pb-1">
         <div className="flex items-center gap-1 bg-surface-2/40 rounded-xl p-1.5 w-max">
           {LEAGUES.map(lg => (
@@ -185,9 +187,7 @@ export default function FutbolClient() {
               onClick={() => setActiveLeague(lg.key)}
               className={cn(
                 'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all',
-                activeLeague === lg.key
-                  ? 'bg-surface text-text shadow-md'
-                  : 'text-text-muted hover:text-text'
+                activeLeague === lg.key ? 'bg-surface text-text shadow-md' : 'text-text-muted hover:text-text'
               )}
             >
               <span>{lg.flag}</span>
@@ -197,32 +197,25 @@ export default function FutbolClient() {
         </div>
       </div>
 
-      {/* Market + EV Filter */}
-      <div className="flex flex-wrap items-center gap-4">
-        <div className="flex items-center gap-1 bg-surface-2 rounded-lg p-1">
-          {([['moneyline', '1X2'], ['over_under', 'Over/Under'], ['btts', 'BTTS']] as [Market, string][]).map(([val, label]) => (
-            <button
-              key={val}
-              onClick={() => setActiveMarket(val)}
-              className={cn(
-                'px-3 py-1.5 rounded-md text-xs font-semibold transition-all',
-                activeMarket === val ? 'bg-football-green/80 text-white' : 'text-text-muted hover:text-text'
-              )}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex items-center gap-3 flex-1 min-w-[180px]">
-          <Filter className="w-3.5 h-3.5 text-text-muted flex-shrink-0" />
-          <span className="text-xs text-text-muted whitespace-nowrap">EV: {minEV}%</span>
-          <input
-            type="range" min={0} max={15} step={1} value={minEV}
-            onChange={e => setMinEV(Number(e.target.value))}
-            className="flex-1 accent-football-green cursor-pointer"
-          />
-        </div>
+      {/* Analysis view selector */}
+      <div className="flex items-center gap-1 bg-surface-2 rounded-lg p-1 w-max">
+        {([
+          ['resultado', 'Resultado', BarChart2],
+          ['goles',     'Goles',     Target],
+          ['corners',   'Córners',   TrendingUp],
+        ] as [AnalysisView, string, React.ElementType][]).map(([val, label, Icon]) => (
+          <button
+            key={val}
+            onClick={() => setActiveView(val)}
+            className={cn(
+              'flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all',
+              activeView === val ? 'bg-football-green/80 text-white' : 'text-text-muted hover:text-text'
+            )}
+          >
+            <Icon className="w-3.5 h-3.5" />
+            {label}
+          </button>
+        ))}
       </div>
 
       {/* Match cards */}
@@ -230,7 +223,7 @@ export default function FutbolClient() {
         {isLoading ? (
           <div className="col-span-full text-center py-12 text-text-muted">
             <Loader2 className="w-8 h-8 animate-spin mx-auto mb-3" />
-            <p>Conectando con Supabase y Scrapers...</p>
+            <p>Cargando predicciones...</p>
           </div>
         ) : filtered.length === 0 ? (
           <div className="col-span-full text-center py-12 text-text-muted">
@@ -238,48 +231,13 @@ export default function FutbolClient() {
             <p>No hay partidos disponibles con los filtros actuales</p>
           </div>
         ) : filtered.map(match => {
-          const p = match.pred
+          const p  = match.pred
           const lg = LEAGUES.find(l => l.key === match.league)
-          const evGood = p.ev >= 0.08
-          const evOk   = p.ev >= 0.05
-          const isConfirmed = confirmed.has(match.id)
-
-          // Render probabilities by market
-          const probs = activeMarket === 'moneyline'
-            ? [
-                { label: '1', desc: match.homeTeam, prob: p.pHome, odd: match.odds.home, best: p.bestMarket === 'home_win' },
-                { label: 'X', desc: 'Empate',        prob: p.pDraw,  odd: match.odds.draw,  best: p.bestMarket === 'draw' },
-                { label: '2', desc: match.awayTeam,  prob: p.pAway,  odd: match.odds.away,  best: p.bestMarket === 'away_win' },
-              ]
-            : activeMarket === 'over_under'
-            ? [
-                { label: '+2.5', desc: 'Over', prob: p.pOver,      odd: match.ouOdds.over,  best: p.bestMarket === 'over_2.5' },
-                { label: '-2.5', desc: 'Under', prob: 1-p.pOver,   odd: match.ouOdds.under, best: p.bestMarket === 'under_2.5' },
-              ]
-            : [
-                { label: 'Sí', desc: 'Ambos marcan', prob: p.pBtts,    odd: match.bttsOdds.yes, best: p.bestMarket === 'btts_yes' },
-                { label: 'No', desc: 'No ambos',     prob: 1-p.pBtts, odd: match.bttsOdds.no,  best: p.bestMarket === 'btts_no' },
-              ]
 
           return (
-            <div
-              key={match.id}
-              className={cn(
-                'card relative overflow-hidden',
-                p.betType === 'parlay' && 'border-orange-500/20',
-                p.betType === 'fixed' && 'border-green-500/20',
-              )}
-            >
-              {/* Ribbon */}
-              <div
-                className={cn('absolute top-0 right-0 px-2.5 py-1 text-xs font-bold', p.betType === 'parlay' ? 'bg-orange-500 text-white' : 'bg-football-green text-white')}
-                style={{ borderRadius: '0 0 0 8px' }}
-              >
-                {p.betType === 'parlay' ? '⚡ PARLAY' : '🔒 FIJA'}
-              </div>
-
-              {/* League + teams */}
-              <div className="mb-3">
+            <div key={match.id} className="card space-y-4">
+              {/* Card header */}
+              <div>
                 <div className="flex items-center gap-1.5 mb-2">
                   <span>{lg?.flag}</span>
                   <span className={cn('text-xs font-semibold', lg?.color)}>{lg?.name}</span>
@@ -287,64 +245,110 @@ export default function FutbolClient() {
                     <Clock className="w-3 h-3" />{match.date}
                   </span>
                 </div>
-                <div className="flex items-center justify-between font-bold text-text text-sm">
-                  <span>{match.homeTeam}</span>
-                  <span className="text-text-muted text-xs">vs</span>
-                  <span>{match.awayTeam}</span>
+                <div className="flex items-center justify-between font-bold text-text">
+                  <span className="text-sm">{match.homeTeam}</span>
+                  <span className="text-text-muted text-xs px-2">vs</span>
+                  <span className="text-sm">{match.awayTeam}</span>
                 </div>
               </div>
 
-              {/* Probability pills */}
-              <div className={cn('grid gap-2 mb-3', probs.length === 3 ? 'grid-cols-3' : 'grid-cols-2')}>
-                {probs.map(pr => (
-                  <div
-                    key={pr.label}
-                    className={cn(
-                      'flex flex-col items-center p-2 rounded-lg border transition-all',
-                      pr.best ? 'bg-football-green/10 border-football-green/30' : 'bg-surface-2/30 border-transparent'
-                    )}
-                  >
-                    <span className={cn('text-base font-black', pr.best ? 'text-football-green' : 'text-text-muted')}>{pr.odd.toFixed(2)}</span>
-                    <span className="text-xs font-bold text-text">{pr.label}</span>
-                    <span className="text-xs text-text-muted">{(pr.prob * 100).toFixed(0)}%</span>
-                  </div>
-                ))}
+              {/* Confidence badge */}
+              <div className="flex items-center gap-2">
+                <ConfidenceBadge level={p.winner_confidence} />
               </div>
 
-              {/* Expected goals (O/U market context) */}
-              {activeMarket === 'over_under' && (
-                <div className="flex items-center gap-2 mb-3 text-xs text-text-muted">
-                  <Flame className="w-3.5 h-3.5 text-orange-400" />
-                  Goles esperados: <span className="text-text font-bold">{p.expGoals.toFixed(1)}</span>
+              {/* ── Resultado view ── */}
+              {activeView === 'resultado' && (
+                <div className="space-y-2">
+                  <ProbBar
+                    label={`Local — ${match.homeTeam}`}
+                    prob={p.p_home}
+                    highlight={p.predicted_winner === 'home'}
+                  />
+                  <ProbBar
+                    label="Empate"
+                    prob={p.p_draw}
+                    highlight={p.predicted_winner === 'draw'}
+                  />
+                  <ProbBar
+                    label={`Visitante — ${match.awayTeam}`}
+                    prob={p.p_away}
+                    highlight={p.predicted_winner === 'away'}
+                  />
+                  <p className="text-xs text-text-muted pt-1">
+                    Resultado más probable:{' '}
+                    <span className="text-football-green font-semibold">
+                      {winnerLabel(p.predicted_winner, match.homeTeam, match.awayTeam)}
+                    </span>
+                  </p>
                 </div>
               )}
 
-              {/* Best market + EV */}
-              <div className="flex items-center gap-2 mb-4 flex-wrap">
-                <MarketBadge market={p.bestMarket} />
-                <span className={cn('badge', evGood ? 'badge-success' : evOk ? 'badge-warning' : 'badge-danger')}>
-                  {evGood ? '✓' : evOk ? '~' : '!'} EV {(p.ev * 100).toFixed(1)}%
-                </span>
-                {p.amount > 0 && <span className="badge badge-blue">💰 {formatCOP(p.amount)}</span>}
-              </div>
-
-              {/* Action */}
-              {isConfirmed ? (
-                <div className="w-full py-2 rounded-lg bg-success/10 border border-success/20 text-success text-sm font-semibold text-center">
-                  ✓ Registrada
+              {/* ── Goles view ── */}
+              {activeView === 'goles' && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between bg-surface-2/60 rounded-lg px-3 py-2">
+                    <span className="text-xs text-text-muted">Goles esperados</span>
+                    <span className="text-lg font-black text-football-green">{p.exp_goals.toFixed(1)}</span>
+                  </div>
+                  <div className="flex items-center justify-between bg-surface-2/60 rounded-lg px-3 py-2">
+                    <span className="text-xs text-text-muted">Marcador más probable</span>
+                    <span className="text-sm font-bold text-text">{p.most_likely_score}</span>
+                  </div>
+                  <div className="space-y-1.5">
+                    <p className="text-xs text-text-muted font-semibold uppercase tracking-wide">Distribución de goles</p>
+                    <ProbBar label="0–1 goles"  prob={p.goals_range.p_0_1}   highlight={false} />
+                    <ProbBar label="2–3 goles"  prob={p.goals_range.p_2_3}   highlight={p.goals_range.p_2_3 >= Math.max(p.goals_range.p_0_1, p.goals_range.p_4_plus)} />
+                    <ProbBar label="4+ goles"   prob={p.goals_range.p_4_plus} highlight={false} />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="bg-surface-2/60 rounded-lg px-3 py-2 text-center">
+                      <div className="text-xs text-text-muted">Ambos marcan</div>
+                      <div className="text-sm font-bold text-text">{(p.p_btts * 100).toFixed(0)}%</div>
+                    </div>
+                    <div className="bg-surface-2/60 rounded-lg px-3 py-2 text-center">
+                      <div className="text-xs text-text-muted">Más de 2.5</div>
+                      <div className="text-sm font-bold text-text">{(p.p_over * 100).toFixed(0)}%</div>
+                    </div>
+                  </div>
                 </div>
-              ) : (
-                <button
-                  onClick={() => setActiveBet(buildBetCandidate(match))}
-                  disabled={p.ev < 0.03}
-                  className={cn(
-                    'w-full flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-semibold transition-all',
-                    p.ev >= 0.03 ? 'btn-primary' : 'bg-surface-2 text-text-muted cursor-not-allowed'
-                  )}
-                >
-                  <PlusCircle className="w-4 h-4" />
-                  {p.ev >= 0.03 ? 'Agregar apuesta' : 'EV insuficiente'}
-                </button>
+              )}
+
+              {/* ── Corners view ── */}
+              {activeView === 'corners' && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between bg-surface-2/60 rounded-lg px-3 py-2">
+                    <span className="text-xs text-text-muted">Córners estimados</span>
+                    <span className="text-lg font-black text-football-green">{p.corners_estimate.toFixed(1)}</span>
+                  </div>
+                  <div className="flex items-center justify-between bg-surface-2/60 rounded-lg px-3 py-2">
+                    <span className="text-xs text-text-muted">Marca primero (Local)</span>
+                    <span className="text-sm font-bold text-text">{(p.home_scores_first_pct * 100).toFixed(0)}%</span>
+                  </div>
+                  <div className="space-y-1.5">
+                    <p className="text-xs text-text-muted font-semibold uppercase tracking-wide">xG por equipo</p>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-text-muted w-20 truncate">{match.homeTeam}</span>
+                      <div className="flex-1 h-2 bg-surface-2 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-football-green rounded-full transition-all duration-700"
+                          style={{ width: `${(p.xg_home / (p.xg_home + p.xg_away)) * 100}%` }}
+                        />
+                      </div>
+                      <span className="text-xs font-bold text-text w-8 text-right">{p.xg_home.toFixed(2)}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-text-muted w-20 truncate">{match.awayTeam}</span>
+                      <div className="flex-1 h-2 bg-surface-2 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-blue-400 rounded-full transition-all duration-700"
+                          style={{ width: `${(p.xg_away / (p.xg_home + p.xg_away)) * 100}%` }}
+                        />
+                      </div>
+                      <span className="text-xs font-bold text-text w-8 text-right">{p.xg_away.toFixed(2)}</span>
+                    </div>
+                  </div>
+                </div>
               )}
             </div>
           )
@@ -355,18 +359,11 @@ export default function FutbolClient() {
       <div className="card bg-football-green/5 border-football-green/10 flex items-start gap-3">
         <TrendingUp className="w-5 h-5 text-football-green flex-shrink-0 mt-0.5" />
         <div className="text-sm text-text-muted">
-          <span className="text-text font-semibold">Datos de demostración.</span>{' '}
-          Los partidos reales se cargan desde el{' '}
-          <a href="/scraping-hub" className="text-football-green hover:underline font-medium">Scraping Hub</a>
-          {' '}ejecutando los scrapers de fbref.com y Betplay/Rushbet.
+          <span className="text-text font-semibold">Modelos estadísticos.</span>{' '}
+          Las predicciones usan modelos Poisson para goles y xG, combinados con XGBoost entrenado con datos históricos
+          de fbref.com. Las probabilidades reflejan el análisis del modelo, no garantías de resultado.
         </div>
       </div>
-
-      <ConfirmBetModal
-        bet={activeBet}
-        onClose={() => setActiveBet(null)}
-        onConfirm={id => { setConfirmed(prev => new Set(Array.from(prev).concat(activeBet?.matchId || ''))); setActiveBet(null) }}
-      />
     </div>
   )
 }

@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server'
 
+export const dynamic = 'force-dynamic'
+
 const STARS_PRA: Record<string, { team: string; pra: number }> = {
   'Luka Doncic':          { team: 'Mavericks', pra: 46.5 },
   'Nikola Jokic':         { team: 'Nuggets',   pra: 45.5 },

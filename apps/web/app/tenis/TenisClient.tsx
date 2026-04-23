@@ -1,139 +1,157 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Dumbbell, Clock, Filter, PlusCircle, Trophy, Activity, Target, Loader2 } from 'lucide-react'
-import { cn, formatCOP } from '@/lib/utils'
-import ConfirmBetModal, { type BetCandidate } from '@/components/ui/ConfirmBetModal'
+import { Dumbbell, Clock, BarChart2, Layers, Hash, Activity, Trophy, Loader2 } from 'lucide-react'
+import { cn } from '@/lib/utils'
 
 // ---- Types ------------------------------------------------------------------
-type BestMarket = 'p1_win' | 'p2_win' | 'handicap_p1' | 'handicap_p2' | 'over_games' | 'under_games' | 'first_set_p1' | 'first_set_p2'
+type AnalysisView = 'ganador' | 'sets' | 'juegos'
 
-interface MatchPred {
-  p1WinProb: number; p2WinProb: number
-  pHandicapP1: number; pHandicapP2: number
-  pOverGames: number; pUnderGames: number; expTotalGames: number; ouLine: number
-  pFirstSetP1: number; pFirstSetP2: number
-  eloP1: number; eloP2: number
-  bestMarket: BestMarket; bestOdd: number; ev: number
-  betType: 'fixed' | 'parlay'; amount: number
+interface TennisPrediction {
+  p1_win_prob: number
+  p2_win_prob: number
+  predicted_winner: 'p1' | 'p2'
+  winner_confidence: 'alta' | 'media' | 'baja'
+  elo_p1: number
+  elo_p2: number
+  elo_diff: number
+  surface_advantage: 'p1' | 'p2' | 'neutral'
+  p_straight_sets: number
+  p_three_sets: number
+  exp_sets: number
+  most_likely_result: '2-0' | '2-1'
+  exp_total_games: number
+  p_over_22_5: number
+  p_under_22_5: number
+  p_handicap_p1: number
+  p_firstset_p1: number
 }
 
-type MarketTab = 'moneyline' | 'handicap' | 'over_under' | 'first_set'
+interface MappedMatch {
+  id: string
+  tour: string
+  tournament: string
+  surface: string
+  round: string
+  date: string
+  player1: string
+  player2: string
+  pred: TennisPrediction
+}
 
 // ---- Config -----------------------------------------------------------------
 const TOURS = [
-  { key: 'all', label: 'Todos', color: 'text-text' },
+  { key: 'all', label: 'Todos',    color: 'text-text' },
   { key: 'ATP', label: 'ATP Tour', color: 'text-blue-400' },
   { key: 'WTA', label: 'WTA Tour', color: 'text-pink-400' },
 ]
 
 const SURFACES = [
-  { key: 'all',    label: 'Todas', bgColor: 'bg-surface-2' },
-  { key: 'hard',   label: 'Hard',  bgColor: 'bg-blue-500/20 text-blue-400' },
-  { key: 'clay',   label: 'Clay',  bgColor: 'bg-orange-500/20 text-orange-400' },
-  { key: 'grass',  label: 'Grass', bgColor: 'bg-green-500/20 text-green-400' },
-  { key: 'indoor', label: 'Indoor',bgColor: 'bg-purple-500/20 text-purple-400' },
+  { key: 'all',    label: 'Todas',  bgColor: 'bg-surface-2 text-text-muted' },
+  { key: 'hard',   label: 'Hard',   bgColor: 'bg-blue-500/20 text-blue-400' },
+  { key: 'clay',   label: 'Clay',   bgColor: 'bg-orange-500/20 text-orange-400' },
+  { key: 'grass',  label: 'Grass',  bgColor: 'bg-green-500/20 text-green-400' },
+  { key: 'indoor', label: 'Indoor', bgColor: 'bg-purple-500/20 text-purple-400' },
 ]
 
-function MarketBadge({ market }: { market: string }) {
-  const map: Record<string, string> = {
-    p1_win: '🏆 P1 Gana',
-    p2_win: '🏆 P2 Gana',
-    handicap_p1: '⚖️ P1 -1.5 Sets',
-    handicap_p2: '⚖️ P2 -1.5 Sets',
-    over_games: '🔥 Over Goles',
-    under_games: '🧊 Under Goles',
-    first_set_p1: '🥇 1er Set P1',
-    first_set_p2: '🥇 1er Set P2',
-  }
-  return <span className="badge badge-orange">{map[market] || market}</span>
+// ---- Helpers ----------------------------------------------------------------
+function surfaceSlug(m: any): string {
+  const raw = (m.surface || '').toLowerCase()
+  if (raw && raw !== 'unknown') return raw
+  const t = (m.tournament || m.round || '').toLowerCase()
+  if (t.includes('clay') || t.includes('monte') || t.includes('madrid') || t.includes('rome') || t.includes('roland') || t.includes('barcelona')) return 'clay'
+  if (t.includes('wimbledon') || t.includes('grass') || t.includes('queen') || t.includes('halle')) return 'grass'
+  return 'hard'
 }
 
+function ConfidenceBadge({ level }: { level: 'alta' | 'media' | 'baja' }) {
+  const map = {
+    alta:  { cls: 'badge badge-success', label: 'Confianza Alta' },
+    media: { cls: 'badge badge-warning', label: 'Confianza Media' },
+    baja:  { cls: 'badge badge-danger',  label: 'Confianza Baja' },
+  }
+  const { cls, label } = map[level]
+  return <span className={cls}>{label}</span>
+}
+
+function SurfaceAdvantageBadge({ adv, p1, p2 }: { adv: 'p1' | 'p2' | 'neutral'; p1: string; p2: string }) {
+  if (adv === 'neutral') return <span className="badge badge-blue">Superficie: Neutral</span>
+  const name = adv === 'p1' ? p1 : p2
+  return <span className="badge badge-warning">Ventaja superficie: {name}</span>
+}
+
+function ProbBar({ label, prob, highlight, accentColor = 'bg-tennis-orange' }: {
+  label: string; prob: number; highlight: boolean; accentColor?: string
+}) {
+  return (
+    <div className={cn('flex flex-col gap-1 p-2.5 rounded-lg border', highlight ? 'bg-tennis-orange/10 border-tennis-orange/30' : 'bg-surface-2/30 border-transparent')}>
+      <div className="flex justify-between items-center text-xs">
+        <span className={cn('font-semibold', highlight ? 'text-tennis-orange' : 'text-text-muted')}>{label}</span>
+        <span className={cn('font-bold', highlight ? 'text-tennis-orange' : 'text-text')}>{(prob * 100).toFixed(0)}%</span>
+      </div>
+      <div className="h-1.5 bg-surface-2 rounded-full overflow-hidden">
+        <div
+          className={cn('h-full rounded-full transition-all duration-700', highlight ? accentColor : 'bg-surface-2')}
+          style={{ width: `${prob * 100}%`, backgroundColor: highlight ? undefined : 'rgb(var(--color-text-muted) / 0.3)' }}
+        />
+      </div>
+    </div>
+  )
+}
+
+// ---- Main component ---------------------------------------------------------
 export default function TenisClient() {
   const [activeTour,    setActiveTour]    = useState('all')
   const [activeSurface, setActiveSurface] = useState('all')
-  const [activeMarket,  setActiveMarket]  = useState<MarketTab>('moneyline')
-  const [minEV,         setMinEV]         = useState(0)
-  const [activeBet,     setActiveBet]     = useState<BetCandidate | null>(null)
-  const [confirmed,     setConfirmed]     = useState<Set<string>>(new Set())
-  const [liveMatches,   setLiveMatches]   = useState<any[]>([])
+  const [activeView,    setActiveView]    = useState<AnalysisView>('ganador')
+  const [liveMatches,   setLiveMatches]   = useState<MappedMatch[]>([])
   const [isLoading,     setIsLoading]     = useState(true)
 
   useEffect(() => {
     async function fetchMatches() {
       try {
-        const res = await fetch(`/api/tennis/matches`)
+        const res = await fetch('/api/tennis/matches')
         if (res.ok) {
           const data = await res.json()
           if (data.matches && data.matches.length > 0) {
-             const mapped = data.matches.map((m: any) => {
-                const pred  = m.prediction || {}
-                const odds  = m.odds || []
-                const p1Odd = odds.find((o: any) => o.selection === 'home')?.odd_value || 1.85
-                const p2Odd = odds.find((o: any) => o.selection === 'away')?.odd_value || 1.95
-                const hnP1  = odds.find((o: any) => o.selection === 'handicap_home')?.odd_value || 1.85
-                const hnP2  = odds.find((o: any) => o.selection === 'handicap_away')?.odd_value || 1.95
-                const overO = odds.find((o: any) => o.selection === 'over_games')?.odd_value  || 1.90
-                const underO= odds.find((o: any) => o.selection === 'under_games')?.odd_value || 1.90
-                const fsP1  = odds.find((o: any) => o.selection === 'firstset_home')?.odd_value || 1.85
-                const fsP2  = odds.find((o: any) => o.selection === 'firstset_away')?.odd_value || 1.95
-
-                const p1Win  = pred.p1_win_prob || pred.confidence || 0.50
-                const p2Win  = pred.p2_win_prob || (1 - p1Win)
-                const pHnP1  = pred.p_handicap_p1 || 0.50
-                const pOver  = pred.p_over_games  || 0.50
-                const pFs1   = pred.p_firstset_p1 || 0.50
-                const ev     = pred.expected_value || 0
-
-                // Determine surface from tournament name or server field
-                const surfaceFromServer = (m.surface || '').toLowerCase()
-                const tournName = (m.tournament || m.round || '').toLowerCase()
-                const surface = surfaceFromServer && surfaceFromServer !== 'unknown'
-                  ? surfaceFromServer
-                  : (tournName.includes('clay') || tournName.includes('monte') || tournName.includes('madrid') || tournName.includes('rome') || tournName.includes('roland') || tournName.includes('barcelona'))
-                    ? 'clay'
-                    : (tournName.includes('wimbledon') || tournName.includes('grass') || tournName.includes('queen') || tournName.includes('halle'))
-                      ? 'grass'
-                      : 'hard'
-
-                return {
-                  id: m.id,
-                  tour: (m.league || 'ATP').toUpperCase().includes('WTA') ? 'WTA' : 'ATP',
-                  tournament: m.tournament || m.round || 'Tournament',
-                  surface,
-                  round: m.round || 'Round',
-                  date: new Date(m.match_date).toLocaleString('es-CO', {day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'}),
-                  player1: m.home_team?.name || 'Player 1',
-                  player2: m.away_team?.name || 'Player 2',
-                  odds:   { p1: p1Odd, p2: p2Odd },
-                  hnOdds: { p1: hnP1, p2: hnP2 },
-                  ouOdds: { over: overO, under: underO },
-                  fsOdds: { p1: fsP1, p2: fsP2 },
-                  pred: {
-                    p1WinProb:   +p1Win.toFixed(4),
-                    p2WinProb:   +p2Win.toFixed(4),
-                    pHandicapP1: +pHnP1.toFixed(4),
-                    pHandicapP2: +(1 - pHnP1).toFixed(4),
-                    pOverGames:  +pOver.toFixed(4),
-                    pUnderGames: +(1 - pOver).toFixed(4),
-                    expTotalGames: pred.exp_total_games || 22.5,
-                    ouLine:      pred.ou_line || 22.5,
-                    pFirstSetP1: +pFs1.toFixed(4),
-                    pFirstSetP2: +(1 - pFs1).toFixed(4),
-                    eloP1: 2000, eloP2: 2000,
-                    bestMarket:  (pred.recommended_market || pred.best_market || 'p1_win') as BestMarket,
-                    bestOdd:     pred.best_odd || Math.max(p1Odd, p2Odd),
-                    ev,
-                    betType:     (pred.bet_type || 'fixed') as 'fixed' | 'parlay',
-                    amount:      pred.suggested_amount_cop || 0,
-                  }
-                }
-             })
-             setLiveMatches(mapped)
+            const mapped: MappedMatch[] = data.matches.map((m: any) => {
+              const pred = m.prediction || {}
+              const p1Win = pred.p1_win_prob ?? 0.50
+              return {
+                id: m.id,
+                tour: (m.league || 'ATP').toUpperCase().includes('WTA') ? 'WTA' : 'ATP',
+                tournament: m.tournament || m.round || 'Tournament',
+                surface: surfaceSlug(m),
+                round: m.round || 'Round',
+                date: new Date(m.match_date).toLocaleString('es-CO', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }),
+                player1: m.home_team?.name || 'Player 1',
+                player2: m.away_team?.name || 'Player 2',
+                pred: {
+                  p1_win_prob:        p1Win,
+                  p2_win_prob:        pred.p2_win_prob ?? (1 - p1Win),
+                  predicted_winner:   pred.predicted_winner ?? 'p1',
+                  winner_confidence:  pred.winner_confidence ?? 'baja',
+                  elo_p1:             pred.elo_p1 ?? 2000,
+                  elo_p2:             pred.elo_p2 ?? 2000,
+                  elo_diff:           pred.elo_diff ?? 0,
+                  surface_advantage:  pred.surface_advantage ?? 'neutral',
+                  p_straight_sets:    pred.p_straight_sets ?? 0.45,
+                  p_three_sets:       pred.p_three_sets ?? 0.55,
+                  exp_sets:           pred.exp_sets ?? 2.5,
+                  most_likely_result: pred.most_likely_result ?? '2-1',
+                  exp_total_games:    pred.exp_total_games ?? 22,
+                  p_over_22_5:        pred.p_over_22_5 ?? 0.50,
+                  p_under_22_5:       pred.p_under_22_5 ?? 0.50,
+                  p_handicap_p1:      pred.p_handicap_p1 ?? 0.50,
+                  p_firstset_p1:      pred.p_firstset_p1 ?? 0.50,
+                },
+              }
+            })
+            setLiveMatches(mapped)
           }
         }
       } catch (err) {
-        console.error("No real stats. Falling back to mocks.")
+        console.error('Tennis fetch error', err)
       } finally {
         setIsLoading(false)
       }
@@ -142,41 +160,10 @@ export default function TenisClient() {
   }, [])
 
   const filtered = liveMatches.filter(m => {
-    if (activeTour !== 'all' && m.tour !== activeTour) return false
+    if (activeTour    !== 'all' && m.tour    !== activeTour)    return false
     if (activeSurface !== 'all' && m.surface !== activeSurface) return false
-    // Only apply EV filter to matches that actually have a predicted EV
-    if (m.pred.ev > 0 && m.pred.ev * 100 < minEV) return false
     return true
   })
-
-  function buildBetCandidate(match: any): BetCandidate {
-    const p = match.pred
-    const selectionMap: Record<string, string> = {
-      p1_win: `${match.player1} gana`,
-      p2_win: `${match.player2} gana`,
-      handicap_p1: `${match.player1} -1.5 Sets`,
-      handicap_p2: `${match.player2} -1.5 Sets`,
-      over_games: `Más de ${p.ouLine} juegos`,
-      under_games: `Menos de ${p.ouLine} juegos`,
-      first_set_p1: `${match.player1} gana 1er Set`,
-      first_set_p2: `${match.player2} gana 1er Set`,
-    }
-    return {
-      matchId:         match.id,
-      homeTeam:        match.player1,
-      awayTeam:        match.player2,
-      sport:           'tennis',
-      market:          p.bestMarket.includes('handicap') ? 'Set Handicap' :
-                       p.bestMarket.includes('over') || p.bestMarket.includes('under') ? 'Total Games' :
-                       p.bestMarket.includes('first_set') ? '1st Set Winner' : 'Moneyline',
-      selection:       selectionMap[p.bestMarket] || p.bestMarket,
-      suggestedOdd:    p.bestOdd,
-      suggestedAmount: p.amount,
-      confidence:      Math.max(p.p1WinProb, p.p2WinProb, p.pOverGames, p.pHandicapP1, p.pFirstSetP1),
-      expectedValue:   p.ev,
-      betType:         p.betType,
-    }
-  }
 
   return (
     <div className="space-y-6">
@@ -185,18 +172,20 @@ export default function TenisClient() {
         <div>
           <h2 className="text-2xl font-bold text-text flex items-center gap-3">
             <Dumbbell className="w-6 h-6 text-tennis-orange" />
-            Tenis — Predicciones ajustadas por Superficie
+            Tenis — Análisis Estadístico
           </h2>
-          <p className="text-text-muted text-sm mt-1">ATP/WTA · Modelos Elo dinámicos + XGBoost · 4 Mercados</p>
+          <p className="text-text-muted text-sm mt-1">
+            ATP/WTA · Modelos Elo por superficie · Probabilidades de sets y juegos
+          </p>
         </div>
         <div className="flex items-center gap-2 text-xs text-text-muted bg-surface-2 px-3 py-2 rounded-lg">
           <Clock className="w-3.5 h-3.5" />
-          Scraped hace 12 min
+          Actualizado hace 12 min
         </div>
       </div>
 
-      {/* Filters (Tour + Surface) */}
-      <div className="flex flex-wrap items-center gap-6">
+      {/* Tour + Surface filters */}
+      <div className="flex flex-wrap items-center gap-4">
         <div className="flex items-center gap-1 bg-surface-2/40 rounded-xl p-1.5 w-max">
           {TOURS.map(t => (
             <button
@@ -228,40 +217,33 @@ export default function TenisClient() {
         </div>
       </div>
 
-      {/* Market + EV Threshold */}
-      <div className="flex flex-wrap items-center gap-4">
-        <div className="flex items-center gap-1 bg-surface-2 rounded-lg p-1">
-          {([['moneyline', 'Match Winner'], ['handicap', 'Set Handicap'], ['over_under', 'Total Games'], ['first_set', '1st Set']] as [MarketTab, string][]).map(([val, label]) => (
-            <button
-              key={val}
-              onClick={() => setActiveMarket(val)}
-              className={cn(
-                'px-3 py-1.5 rounded-md text-xs font-semibold transition-all',
-                activeMarket === val ? 'bg-tennis-orange/80 text-white' : 'text-text-muted hover:text-text'
-              )}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex items-center gap-3 flex-1 min-w-[180px]">
-          <Filter className="w-3.5 h-3.5 text-text-muted flex-shrink-0" />
-          <span className="text-xs text-text-muted whitespace-nowrap">EV Mín: {minEV}%</span>
-          <input
-            type="range" min={0} max={15} step={1} value={minEV}
-            onChange={e => setMinEV(Number(e.target.value))}
-            className="flex-1 accent-tennis-orange cursor-pointer"
-          />
-        </div>
+      {/* Analysis view selector */}
+      <div className="flex items-center gap-1 bg-surface-2 rounded-lg p-1 w-max">
+        {([
+          ['ganador', 'Ganador', BarChart2],
+          ['sets',    'Sets',    Layers],
+          ['juegos',  'Juegos',  Hash],
+        ] as [AnalysisView, string, React.ElementType][]).map(([val, label, Icon]) => (
+          <button
+            key={val}
+            onClick={() => setActiveView(val)}
+            className={cn(
+              'flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all',
+              activeView === val ? 'bg-tennis-orange/80 text-white' : 'text-text-muted hover:text-text'
+            )}
+          >
+            <Icon className="w-3.5 h-3.5" />
+            {label}
+          </button>
+        ))}
       </div>
 
-      {/* Grid */}
+      {/* Match grid */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {isLoading ? (
           <div className="col-span-full text-center py-12 text-text-muted">
             <Loader2 className="w-8 h-8 animate-spin mx-auto mb-3" />
-            <p>Conectando con Supabase y Scrapers...</p>
+            <p>Cargando predicciones de tenis...</p>
           </div>
         ) : filtered.length === 0 ? (
           <div className="col-span-full text-center py-12 text-text-muted">
@@ -270,38 +252,18 @@ export default function TenisClient() {
           </div>
         ) : filtered.map(match => {
           const p = match.pred
-          const isConfirmed = confirmed.has(match.id)
-          const evGood = p.ev >= 0.08
-          const evOk   = p.ev >= 0.05
           const surfConf = SURFACES.find(s => s.key === match.surface)
-
-          // Data to show based on market tab
-          const probs = activeMarket === 'moneyline' ? [
-            { label: 'P1 Win', desc: match.player1, prob: p.p1WinProb, odd: match.odds.p1, best: p.bestMarket === 'p1_win' },
-            { label: 'P2 Win', desc: match.player2, prob: p.p2WinProb, odd: match.odds.p2, best: p.bestMarket === 'p2_win' }
-          ] : activeMarket === 'handicap' ? [
-            { label: 'P1 -1.5', desc: match.player1, prob: p.pHandicapP1, odd: match.hnOdds.p1, best: p.bestMarket === 'handicap_p1' },
-            { label: 'P2 -1.5', desc: match.player2, prob: p.pHandicapP2, odd: match.hnOdds.p2, best: p.bestMarket === 'handicap_p2' }
-          ] : activeMarket === 'over_under' ? [
-            { label: `+${p.ouLine}`, desc: 'Over Games', prob: p.pOverGames, odd: match.ouOdds.over, best: p.bestMarket === 'over_games' },
-            { label: `-${p.ouLine}`, desc: 'Under Games', prob: p.pUnderGames, odd: match.ouOdds.under, best: p.bestMarket === 'under_games' }
-          ] : [
-            { label: 'P1 1er Set', desc: match.player1, prob: p.pFirstSetP1, odd: match.fsOdds.p1, best: p.bestMarket === 'first_set_p1' },
-            { label: 'P2 1er Set', desc: match.player2, prob: p.pFirstSetP2, odd: match.fsOdds.p2, best: p.bestMarket === 'first_set_p2' }
-          ]
+          const isP1Winner = p.predicted_winner === 'p1'
 
           return (
-            <div key={match.id} className={cn('card relative overflow-hidden', p.betType === 'parlay' && 'border-orange-500/20', p.betType === 'fixed' && 'border-green-500/20')}>
-              {/* Ribbon */}
-              <div className={cn('absolute top-0 right-0 px-2.5 py-1 text-xs font-bold', p.betType === 'parlay' ? 'bg-orange-500 text-white' : 'bg-tennis-orange text-white')} style={{ borderRadius: '0 0 0 8px' }}>
-                {p.betType === 'parlay' ? '⚡ PARLAY' : '🔒 FIJA'}
-              </div>
-
-              {/* Header */}
-              <div className="flex items-start justify-between mb-3">
-                <div>
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className={cn('text-xs font-bold capitalize', surfConf?.bgColor, 'px-2 py-0.5 rounded')}>{match.surface}</span>
+            <div key={match.id} className="card space-y-4">
+              {/* Header: tournament + surface + round */}
+              <div className="flex items-start justify-between">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className={cn('text-xs font-bold capitalize px-2 py-0.5 rounded', surfConf?.bgColor)}>
+                      {match.surface}
+                    </span>
                     <span className="text-xs text-text-muted font-medium">{match.tour} · {match.tournament}</span>
                   </div>
                   <div className="text-xs text-text-muted flex items-center gap-1">
@@ -310,85 +272,115 @@ export default function TenisClient() {
                 </div>
               </div>
 
-              {/* Players vs block */}
-              <div className="flex items-center justify-between mb-4 bg-surface-2/30 p-3 rounded-lg border border-surface-2">
-                <div className="text-center w-full">
-                  <div className="font-bold text-sm text-text">{match.player1}</div>
+              {/* Players with Elo */}
+              <div className="flex items-center bg-surface-2/30 rounded-lg border border-surface-2 overflow-hidden">
+                <div className={cn('flex-1 text-center p-3', isP1Winner ? 'bg-tennis-orange/10' : '')}>
+                  <div className={cn('font-bold text-sm', isP1Winner ? 'text-tennis-orange' : 'text-text')}>
+                    {match.player1}
+                  </div>
                   <div className="text-xs text-text-muted flex items-center justify-center gap-1 mt-0.5">
-                    <Activity className="w-3 h-3 text-tennis-orange" /> Elo: {p.eloP1}
+                    <Activity className="w-3 h-3 text-tennis-orange" /> Elo: {p.elo_p1}
                   </div>
                 </div>
-                <div className="px-3 text-xs text-text-muted font-bold">VS</div>
-                <div className="text-center w-full">
-                  <div className="font-bold text-sm text-text">{match.player2}</div>
+                <div className="px-3 text-xs text-text-muted font-bold shrink-0">VS</div>
+                <div className={cn('flex-1 text-center p-3', !isP1Winner ? 'bg-tennis-orange/10' : '')}>
+                  <div className={cn('font-bold text-sm', !isP1Winner ? 'text-tennis-orange' : 'text-text')}>
+                    {match.player2}
+                  </div>
                   <div className="text-xs text-text-muted flex items-center justify-center gap-1 mt-0.5">
-                    <Activity className="w-3 h-3 text-tennis-orange" /> Elo: {p.eloP2}
+                    <Activity className="w-3 h-3 text-tennis-orange" /> Elo: {p.elo_p2}
                   </div>
                 </div>
               </div>
 
-              {/* Expected Total Games context if viewing O/U */}
-              {activeMarket === 'over_under' && (
-                <div className="flex items-center justify-center gap-2 mb-3 text-xs text-text-muted bg-surface-2/50 py-1.5 rounded">
-                  <Target className="w-3.5 h-3.5 text-tennis-orange" />
-                  Juegos esperados según modelo Elo: <span className="text-text font-bold">{p.expTotalGames.toFixed(1)}</span>
+              {/* Surface advantage badge */}
+              <div className="flex flex-wrap gap-2">
+                <SurfaceAdvantageBadge adv={p.surface_advantage} p1={match.player1} p2={match.player2} />
+              </div>
+
+              {/* ── Ganador view ── */}
+              {activeView === 'ganador' && (
+                <div className="space-y-2">
+                  <ProbBar label={match.player1} prob={p.p1_win_prob} highlight={isP1Winner} />
+                  <ProbBar label={match.player2} prob={p.p2_win_prob} highlight={!isP1Winner} />
+                  <ConfidenceBadge level={p.winner_confidence} />
+                  <p className="text-xs text-text-muted">
+                    Ganador proyectado:{' '}
+                    <span className="text-tennis-orange font-semibold">
+                      {isP1Winner ? match.player1 : match.player2}
+                    </span>
+                  </p>
                 </div>
               )}
 
-              {/* Probabilities */}
-              <div className="grid grid-cols-2 gap-3 mb-4">
-                {probs.map(pr => (
-                  <div key={pr.label} className={cn('flex flex-col items-center p-2 rounded-lg border transition-all', pr.best ? 'bg-tennis-orange/10 border-tennis-orange/30' : 'bg-surface-2/30 border-transparent')}>
-                    <span className={cn('text-lg font-black', pr.best ? 'text-tennis-orange' : 'text-text-muted')}>{pr.odd.toFixed(2)}</span>
-                    <span className="text-sm font-bold text-text truncate w-full text-center">{pr.label}</span>
-                    <span className="text-xs text-text-muted">{(pr.prob * 100).toFixed(0)}%</span>
+              {/* ── Sets view ── */}
+              {activeView === 'sets' && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between bg-surface-2/60 rounded-lg px-3 py-2">
+                    <span className="text-xs text-text-muted">Resultado más probable</span>
+                    <span className="badge badge-blue">{p.most_likely_result}</span>
                   </div>
-                ))}
-              </div>
+                  <div className="flex items-center justify-between bg-surface-2/60 rounded-lg px-3 py-2">
+                    <span className="text-xs text-text-muted">Sets esperados</span>
+                    <span className="text-lg font-black text-tennis-orange">{p.exp_sets.toFixed(1)}</span>
+                  </div>
+                  <div className="space-y-1.5">
+                    <p className="text-xs text-text-muted font-semibold uppercase tracking-wide">Escenarios</p>
+                    <ProbBar label="Sets directos (2-0)" prob={p.p_straight_sets} highlight={p.p_straight_sets > p.p_three_sets} />
+                    <ProbBar label="Tres sets (2-1)"    prob={p.p_three_sets}    highlight={p.p_three_sets > p.p_straight_sets} />
+                  </div>
+                </div>
+              )}
 
-              {/* Conclusion & Button */}
-              <div className="flex items-center gap-2 mb-4 flex-wrap">
-                <MarketBadge market={p.bestMarket} />
-                <span className={cn('badge', evGood ? 'badge-success' : evOk ? 'badge-warning' : 'badge-danger')}>
-                  {evGood ? '✓' : evOk ? '~' : '!'} EV {(p.ev * 100).toFixed(1)}%
-                </span>
-                {p.amount > 0 && <span className="badge badge-blue">💰 {formatCOP(p.amount)}</span>}
-              </div>
-
-              {isConfirmed ? (
-                <div className="w-full py-2 rounded-lg bg-success/10 border border-success/20 text-success text-sm font-semibold text-center">✓ Registrada</div>
-              ) : (
-                <button
-                  onClick={() => setActiveBet(buildBetCandidate(match))}
-                  disabled={p.ev < 0.03}
-                  className={cn(
-                    'w-full flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-semibold transition-all',
-                    p.ev >= 0.03 ? 'bg-tennis-orange hover:bg-orange-600 text-white shadow-lg' : 'bg-surface-2 text-text-muted cursor-not-allowed'
-                  )}
-                >
-                  <PlusCircle className="w-4 h-4" />
-                  {p.ev >= 0.03 ? 'Agregar apuesta' : 'EV insuficiente'}
-                </button>
+              {/* ── Juegos view ── */}
+              {activeView === 'juegos' && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between bg-surface-2/60 rounded-lg px-3 py-2">
+                    <span className="text-xs text-text-muted">Juegos totales esperados</span>
+                    <span className="text-xl font-black text-tennis-orange">{p.exp_total_games.toFixed(0)}</span>
+                  </div>
+                  <div className="space-y-1.5">
+                    <p className="text-xs text-text-muted font-semibold uppercase tracking-wide">Línea 22.5 juegos</p>
+                    <div className={cn('flex flex-col gap-1 p-2.5 rounded-lg border', p.p_over_22_5 > p.p_under_22_5 ? 'bg-tennis-orange/10 border-tennis-orange/30' : 'bg-surface-2/30 border-transparent')}>
+                      <div className="flex justify-between items-center text-xs">
+                        <span className={cn('font-semibold', p.p_over_22_5 > p.p_under_22_5 ? 'text-tennis-orange' : 'text-text-muted')}>Más de 22.5</span>
+                        <span className={cn('font-bold', p.p_over_22_5 > p.p_under_22_5 ? 'text-tennis-orange' : 'text-text')}>{(p.p_over_22_5 * 100).toFixed(0)}%</span>
+                      </div>
+                      <div className="h-1.5 bg-surface-2 rounded-full overflow-hidden">
+                        <div className="h-full bg-tennis-orange rounded-full transition-all duration-700" style={{ width: `${p.p_over_22_5 * 100}%` }} />
+                      </div>
+                    </div>
+                    <div className={cn('flex flex-col gap-1 p-2.5 rounded-lg border', p.p_under_22_5 > p.p_over_22_5 ? 'bg-tennis-orange/10 border-tennis-orange/30' : 'bg-surface-2/30 border-transparent')}>
+                      <div className="flex justify-between items-center text-xs">
+                        <span className={cn('font-semibold', p.p_under_22_5 > p.p_over_22_5 ? 'text-tennis-orange' : 'text-text-muted')}>Menos de 22.5</span>
+                        <span className={cn('font-bold', p.p_under_22_5 > p.p_over_22_5 ? 'text-tennis-orange' : 'text-text')}>{(p.p_under_22_5 * 100).toFixed(0)}%</span>
+                      </div>
+                      <div className="h-1.5 bg-surface-2 rounded-full overflow-hidden">
+                        <div className="h-full bg-tennis-orange rounded-full transition-all duration-700" style={{ width: `${p.p_under_22_5 * 100}%` }} />
+                      </div>
+                    </div>
+                  </div>
+                  <div className="bg-surface-2/60 rounded-lg px-3 py-2 flex items-center justify-between">
+                    <span className="text-xs text-text-muted">1er set — {match.player1}</span>
+                    <span className="text-sm font-bold text-text">{(p.p_firstset_p1 * 100).toFixed(0)}%</span>
+                  </div>
+                </div>
               )}
             </div>
           )
         })}
       </div>
 
-      <div className="card bg-tennis-orange/5 border-tennis-orange/10 flex items-start gap-3 mt-4">
+      {/* Info note */}
+      <div className="card bg-tennis-orange/5 border-tennis-orange/10 flex items-start gap-3">
         <Trophy className="w-5 h-5 text-tennis-orange flex-shrink-0 mt-0.5" />
         <div className="text-sm text-text-muted">
-          <span className="text-text font-semibold">Ventaja del Modelo:</span>{' '}
-          Los rankings ATP/WTA tradicionales no reflejan el nivel actual en cada superficie.
-          Nuestro modelo ajusta el puntaje Elo de cada jugador basándose en su rendimiento histórico en la superficie específica del torneo, combinándolo con Machine Learning.
+          <span className="text-text font-semibold">Ventaja del modelo:</span>{' '}
+          Los rankings ATP/WTA tradicionales no reflejan el nivel real por superficie.
+          El modelo ajusta el Elo de cada jugador según su rendimiento histórico en la superficie del torneo,
+          combinándolo con análisis Machine Learning de tendencias recientes.
         </div>
       </div>
-
-      <ConfirmBetModal
-        bet={activeBet}
-        onClose={() => setActiveBet(null)}
-        onConfirm={id => { setConfirmed(prev => new Set(Array.from(prev).concat(activeBet?.matchId || ''))); setActiveBet(null) }}
-      />
     </div>
   )
 }

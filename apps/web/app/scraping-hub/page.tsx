@@ -1,8 +1,5 @@
-import type { Metadata } from 'next'
-import ScrapingHubClient from './ScrapingHubClient'
-
-export const metadata: Metadata = { title: 'Scraping Hub' }
+import { redirect } from 'next/navigation'
 
 export default function Page() {
-  return <ScrapingHubClient />
+  redirect('/dashboard')
 }

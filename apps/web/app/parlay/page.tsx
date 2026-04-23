@@ -1,8 +1,5 @@
-import type { Metadata } from 'next'
-import ParlayClient from './ParlayClient'
-
-export const metadata: Metadata = { title: 'Parlays' }
+import { redirect } from 'next/navigation'
 
 export default function Page() {
-  return <ParlayClient />
+  redirect('/dashboard')
 }

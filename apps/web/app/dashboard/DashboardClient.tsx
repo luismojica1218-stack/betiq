@@ -1,239 +1,276 @@
 'use client'
 
-import { useState, useMemo, useEffect } from 'react'
-import { TrendingUp, Target, DollarSign, Activity, Trophy, Globe, Loader2, ArrowUpRight, ArrowDownRight } from 'lucide-react'
-import { formatCOP, formatPercent, cn } from '@/lib/utils'
-import { createClient } from '@/lib/supabase/client'
-import { 
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer,
-  BarChart, Bar, Rectangle,
-  PieChart, Pie, Cell, Label
-} from 'recharts'
+import { useState, useEffect } from 'react'
+import { TrendingUp, Target, Activity, Globe, Trophy, Dumbbell, Loader2, ChevronRight, BarChart2 } from 'lucide-react'
+import { cn } from '@/lib/utils'
+import Link from 'next/link'
 
 const COLORS = {
   success: '#10B981',
-  danger: '#EF4444',
   nba: '#3B82F6',
   football: '#10B981',
   tennis: '#F97316',
-  surface: '#1E1E30',
-  textMuted: '#94A3B8'
+}
+
+interface SportSummary {
+  name: string
+  href: string
+  icon: typeof Globe
+  color: string
+  accent: string
+  count: number
+  topMatch: { home: string; away: string; confidence: string; winner: string } | null
+  loading: boolean
+}
+
+function ConfidenceBadge({ level }: { level: string }) {
+  return (
+    <span className={cn(
+      'text-xs font-semibold px-2 py-0.5 rounded-full',
+      level === 'alta'  ? 'bg-success/15 text-success' :
+      level === 'media' ? 'bg-warning/15 text-warning' :
+                          'bg-surface-2 text-text-muted'
+    )}>
+      {level === 'alta' ? 'Alta' : level === 'media' ? 'Media' : 'Baja'}
+    </span>
+  )
+}
+
+function ProbBar({ label, prob, color, active }: { label: string; prob: number; color: string; active: boolean }) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className={cn('text-xs w-20 truncate', active ? 'text-text font-semibold' : 'text-text-muted')}>{label}</span>
+      <div className="flex-1 h-2 bg-surface-2 rounded-full overflow-hidden">
+        <div
+          className="h-full rounded-full transition-all duration-700"
+          style={{ width: `${prob * 100}%`, backgroundColor: active ? color : '#334155' }}
+        />
+      </div>
+      <span className={cn('text-xs tabular-nums w-8 text-right', active ? 'text-text font-semibold' : 'text-text-muted')}>
+        {(prob * 100).toFixed(0)}%
+      </span>
+    </div>
+  )
 }
 
 export default function DashboardClient() {
-  const [bets, setBets] = useState<any[]>([])
-  const [loading, setLoading] = useState(true)
+  const [footballMatches, setFootballMatches] = useState<any[]>([])
+  const [nbaMatches,      setNbaMatches]      = useState<any[]>([])
+  const [tennisMatches,   setTennisMatches]   = useState<any[]>([])
+  const [loading,         setLoading]         = useState(true)
 
   useEffect(() => {
-    async function loadData() {
+    async function loadAll() {
       try {
-        const sup = createClient()
-        const { data: { user } } = await sup.auth.getUser()
-        // Allow public mock if not logged in
-        let q = sup.from('bets').select('*')
-        if (user) q = q.eq('user_id', user.id)
-        const { data } = await q
-        setBets(data || [])
+        const [fb, nb, tn] = await Promise.all([
+          fetch('/api/football/matches').then(r => r.ok ? r.json() : { matches: [] }),
+          fetch('/api/nba/matches').then(r => r.ok ? r.json() : { matches: [] }),
+          fetch('/api/tennis/matches').then(r => r.ok ? r.json() : { matches: [] }),
+        ])
+        setFootballMatches(fb.matches || [])
+        setNbaMatches(nb.matches || [])
+        setTennisMatches(tn.matches || [])
+      } catch (e) {
+        console.error('Dashboard load error', e)
       } finally {
         setLoading(false)
       }
     }
-    loadData()
+    loadAll()
   }, [])
 
-  // --- KPI Calculations ---
-  const finishedBets = bets.filter(b => b.status === 'won' || b.status === 'lost')
-  const totalApostado = finishedBets.reduce((acc, b) => acc + (b.amount_cop || 0), 0)
-  const totalPL = finishedBets.reduce((acc, b) => acc + (b.profit_loss_cop || 0), 0)
-  const totalGanadas = finishedBets.filter(b => b.status === 'won').length
-  const roi = totalApostado > 0 ? (totalPL / totalApostado) * 100 : 0
-  const winRate = finishedBets.length > 0 ? (totalGanadas / finishedBets.length) * 100 : 0
+  // Sort each sport by confidence: alta > media > baja
+  const confidenceOrder = { alta: 0, media: 1, baja: 2 }
+  const topFootball = [...footballMatches].sort((a, b) =>
+    (confidenceOrder[a.prediction?.winner_confidence as keyof typeof confidenceOrder] ?? 2) -
+    (confidenceOrder[b.prediction?.winner_confidence as keyof typeof confidenceOrder] ?? 2)
+  ).slice(0, 4)
 
-  // Streak
-  let streak = 0
-  let isWinStreak = true
-  if (finishedBets.length > 0) {
-    const sorted = [...finishedBets].sort((a,b) => new Date(b.result_confirmed_at).getTime() - new Date(a.result_confirmed_at).getTime())
-    isWinStreak = sorted[0].status === 'won'
-    for (const b of sorted) {
-      if ((isWinStreak && b.status === 'won') || (!isWinStreak && b.status === 'lost')) streak++
-      else break
-    }
-  }
+  const topNba = [...nbaMatches].sort((a, b) =>
+    (confidenceOrder[a.prediction?.winner_confidence as keyof typeof confidenceOrder] ?? 2) -
+    (confidenceOrder[b.prediction?.winner_confidence as keyof typeof confidenceOrder] ?? 2)
+  ).slice(0, 4)
 
-  const kpis = [
-    { label: 'ROI Total', value: `${totalPL >= 0 ? '+' : ''}${roi.toFixed(1)}%`, trend: totalPL >= 0 ? 'up':'down', icon: TrendingUp, color: 'text-success', bg: 'bg-success/10' },
-    { label: 'Tasa de Éxito', value: `${winRate.toFixed(1)}%`, trend: winRate > 50 ? 'up':'down', sub: `${totalGanadas}/${finishedBets.length}`, icon: Target, color: 'text-accent', bg: 'bg-accent/10' },
-    { label: 'Racha Actual', value: `${streak} ${isWinStreak ? 'ganadas':'perdidas'}`, trend: isWinStreak?'up':'down', icon: Activity, color: 'text-warning', bg: 'bg-warning/10' },
-    { label: 'Utilidad Neta', value: formatCOP(totalPL), trend: totalPL >= 0 ?'up':'down', icon: DollarSign, color: 'text-success', bg: 'bg-success/10' },
+  const topTennis = [...tennisMatches].sort((a, b) =>
+    (confidenceOrder[a.prediction?.winner_confidence as keyof typeof confidenceOrder] ?? 2) -
+    (confidenceOrder[b.prediction?.winner_confidence as keyof typeof confidenceOrder] ?? 2)
+  ).slice(0, 4)
+
+  const stats = [
+    { label: 'Partidos Fútbol', value: footballMatches.length, icon: Globe,   color: 'text-football-green', bg: 'bg-football-green/10' },
+    { label: 'Partidos NBA',    value: nbaMatches.length,      icon: Trophy,  color: 'text-blue-400',       bg: 'bg-blue-400/10' },
+    { label: 'Partidos Tenis',  value: tennisMatches.length,   icon: Dumbbell,color: 'text-tennis-orange',  bg: 'bg-tennis-orange/10' },
+    {
+      label: 'Confianza Alta',
+      value: [
+        ...footballMatches, ...nbaMatches, ...tennisMatches
+      ].filter(m => m.prediction?.winner_confidence === 'alta').length,
+      icon: Target,
+      color: 'text-success',
+      bg: 'bg-success/10',
+    },
   ]
-
-  // --- Chart 1: P&L over time ---
-  const timeData = useMemo(() => {
-    let acc = 0
-    // sort chronological
-    const sorted = [...finishedBets].sort((a,b) => new Date(a.result_confirmed_at).getTime() - new Date(b.result_confirmed_at).getTime())
-    return sorted.map((b, i) => {
-      acc += (b.profit_loss_cop || 0)
-      return { index: i, date: new Date(b.result_confirmed_at).toLocaleDateString('es-CO', {month:'short', day:'numeric'}), pl: acc }
-    })
-  }, [finishedBets])
-
-  // --- Chart 2: Donut Budget ---
-  const pendingAmount = bets.filter(b => b.status === 'pending').reduce((a,b)=>a+(b.amount_cop||0), 0)
-  const totalLimit = 200000
-  const available = Math.max(totalLimit - pendingAmount, 0)
-  const budgetData = [
-    { name: 'Apostado', value: pendingAmount, color: COLORS.nba },
-    { name: 'Disponible', value: available, color: COLORS.textMuted },
-  ]
-
-  // --- Chart 3: Sport Performance ---
-  const sportData = useMemo(() => {
-    const s = { nba: {w:0, l:0, pl:0, a:0}, football: {w:0, l:0, pl:0, a:0}, tennis: {w:0, l:0, pl:0, a:0} }
-    finishedBets.forEach(b => {
-      const sp = (b.sport || '').toLowerCase()
-      if (s[sp as keyof typeof s]) {
-        if (b.status==='won') s[sp as keyof typeof s].w++
-        if (b.status==='lost') s[sp as keyof typeof s].l++
-        s[sp as keyof typeof s].pl += (b.profit_loss_cop || 0)
-        s[sp as keyof typeof s].a += (b.amount_cop || 0)
-      }
-    })
-    return [
-      { name: 'NBA', won: s.nba.w, lost: s.nba.l, roi: s.nba.a > 0 ? (s.nba.pl/s.nba.a)*100 : 0, color: COLORS.nba },
-      { name: 'Fútbol', won: s.football.w, lost: s.football.l, roi: s.football.a > 0 ? (s.football.pl/s.football.a)*100 : 0, color: COLORS.football },
-      { name: 'Tenis', won: s.tennis.w, lost: s.tennis.l, roi: s.tennis.a > 0 ? (s.tennis.pl/s.tennis.a)*100 : 0, color: COLORS.tennis },
-    ]
-  }, [finishedBets])
-
-  // --- Heatmap (Simple grid representation) ---
-  const heatmapData = useMemo(() => {
-    const days: any = {}
-    finishedBets.forEach(b => {
-      const d = new Date(b.result_confirmed_at).toISOString().split('T')[0]
-      if (!days[d]) days[d] = { date: d, pl: 0, count: 0 }
-      days[d].pl += (b.profit_loss_cop || 0)
-      days[d].count++
-    })
-    return Object.values(days).sort((a:any,b:any) => new Date(a.date).getTime() - new Date(b.date).getTime()).slice(-90)
-  }, [finishedBets])
-
-  if (loading) return <div className="flex justify-center p-12"><Loader2 className="w-8 h-8 animate-spin text-orange-500" /></div>
 
   return (
     <div className="space-y-8">
+      {/* Header */}
       <div>
-        <h2 className="text-2xl font-bold text-text">Dashboard Analítico</h2>
-        <p className="text-text-muted text-sm mt-1">Rendimiento global generado con Recharts</p>
+        <h1 className="text-2xl font-bold text-text">Dashboard</h1>
+        <p className="text-text-muted text-sm mt-1">Análisis estadístico de partidos próximos</p>
       </div>
 
-      {/* KPI Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-        {kpis.map((kpi, i) => (
-          <div key={i} className="card">
-            <div className="flex items-start justify-between mb-3">
-              <div className={cn("p-2.5 rounded-lg", kpi.bg)}>
-                <kpi.icon className={cn("w-5 h-5", kpi.color)} />
-              </div>
-              {kpi.trend === 'up' ? <ArrowUpRight className="w-4 h-4 text-success" /> : <ArrowDownRight className="w-4 h-4 text-danger" />}
+      {/* KPI cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        {stats.map(s => (
+          <div key={s.label} className="card">
+            <div className={cn('w-10 h-10 rounded-xl flex items-center justify-center mb-3', s.bg)}>
+              <s.icon className={cn('w-5 h-5', s.color)} />
             </div>
-            <div className="text-2xl font-black text-text">{kpi.value}</div>
-            <div className="text-xs text-text-muted mt-1 font-medium tracking-wider">{kpi.label}</div>
-            {kpi.sub && <div className="text-xs text-text-muted/60 mt-0.5">{kpi.sub}</div>}
+            {loading ? (
+              <div className="h-8 w-12 bg-surface-2 rounded animate-pulse mb-1" />
+            ) : (
+              <div className="text-2xl font-bold text-text mb-0.5">{s.value}</div>
+            )}
+            <div className="text-xs text-text-muted">{s.label}</div>
           </div>
         ))}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* P&L Line Chart */}
-        <div className="card lg:col-span-2 relative min-h-[300px]">
-          <h3 className="section-title text-sm mb-4">Utilidad Acumulada (P&L)</h3>
-          {timeData.length === 0 ? <p className="text-text-muted text-sm text-center py-10">Sin suficientes datos</p> : (
-            <div className="h-[250px] w-full">
-              <ResponsiveContainer>
-                <LineChart data={timeData} margin={{ top: 5, right: 10, left: 10, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#2A2A40" vertical={false} />
-                  <XAxis dataKey="date" stroke="#94A3B8" fontSize={12} tickLine={false} axisLine={false} />
-                  <YAxis stroke="#94A3B8" fontSize={12} tickLine={false} axisLine={false} tickFormatter={(v) => `$${v/1000}k`} />
-                  <RechartsTooltip 
-                    contentStyle={{ backgroundColor: '#1A1A2E', borderColor: '#2A2A40', borderRadius: '8px' }}
-                    itemStyle={{ color: '#F0F4F8' }}
-                    formatter={(val: number) => [formatCOP(val), 'Utilidad Neto']}
-                  />
-                  <Line type="stepAfter" dataKey="pl" stroke={COLORS.success} strokeWidth={3} dot={false} activeDot={{ r: 6 }} />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          )}
+      {loading ? (
+        <div className="flex items-center justify-center py-20 text-text-muted">
+          <Loader2 className="w-8 h-8 animate-spin mr-3" />
+          Cargando análisis...
         </div>
+      ) : (
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+          {/* Football */}
+          <SportSection
+            title="Fútbol"
+            href="/futbol"
+            icon={Globe}
+            color="text-football-green"
+            accent="#10B981"
+            matches={topFootball}
+            renderMatch={(m) => {
+              const p = m.prediction || {}
+              const home = m.home_team?.name || 'Local'
+              const away = m.away_team?.name || 'Visitante'
+              const winner = p.predicted_winner === 'home' ? home : p.predicted_winner === 'away' ? away : 'Empate'
+              return (
+                <div key={m.id} className="p-3 rounded-lg bg-surface-2/40 border border-surface-2/60 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs text-text-muted truncate">{m.league}</span>
+                    <ConfidenceBadge level={p.winner_confidence || 'baja'} />
+                  </div>
+                  <div className="text-sm font-semibold text-text truncate">{home} vs {away}</div>
+                  <div className="space-y-1">
+                    <ProbBar label={home} prob={p.p_home || 0} color="#10B981" active={p.predicted_winner === 'home'} />
+                    <ProbBar label="Empate" prob={p.p_draw || 0} color="#10B981" active={p.predicted_winner === 'draw'} />
+                    <ProbBar label={away} prob={p.p_away || 0} color="#10B981" active={p.predicted_winner === 'away'} />
+                  </div>
+                  <div className="text-xs text-text-muted">Goles esp: <span className="text-text font-medium">{p.exp_goals}</span> · Marcador: <span className="text-text font-medium">{p.most_likely_score}</span></div>
+                </div>
+              )
+            }}
+          />
 
-        {/* Budget Donut */}
-        <div className="card">
-          <h3 className="section-title text-sm mb-4">Presupuesto Semanal COP</h3>
-          <div className="h-[200px] w-full relative">
-            <ResponsiveContainer>
-              <PieChart>
-                <Pie data={budgetData} innerRadius={60} outerRadius={80} paddingAngle={2} dataKey="value" stroke="none">
-                  {budgetData.map((entry, index) => <Cell key={`cell-${index}`} fill={entry.color} />)}
-                  <Label 
-                    value={formatCOP(pendingAmount)} position="center"
-                    className="text-lg font-black fill-text"
-                  />
-                </Pie>
-                <RechartsTooltip formatter={(val: number) => formatCOP(val)} contentStyle={{ backgroundColor: '#1A1A2E', borderColor: '#2A2A40', borderRadius: '8px' }} />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-          <div className="flex justify-between items-center text-xs mt-2 px-6">
-            <span className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-blue-500"/> Apostado</span>
-            <span className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full bg-slate-500"/> Disponible</span>
-          </div>
+          {/* NBA */}
+          <SportSection
+            title="NBA"
+            href="/nba"
+            icon={Trophy}
+            color="text-blue-400"
+            accent="#3B82F6"
+            matches={topNba}
+            renderMatch={(m) => {
+              const p = m.prediction || {}
+              const home = m.home_team?.name || 'Local'
+              const away = m.away_team?.name || 'Visitante'
+              return (
+                <div key={m.id} className="p-3 rounded-lg bg-surface-2/40 border border-surface-2/60 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs text-text-muted">NBA</span>
+                    <ConfidenceBadge level={p.winner_confidence || 'baja'} />
+                  </div>
+                  <div className="text-sm font-semibold text-text truncate">{home} vs {away}</div>
+                  <div className="space-y-1">
+                    <ProbBar label={home} prob={p.home_win_prob || 0} color="#3B82F6" active={p.predicted_winner === 'home'} />
+                    <ProbBar label={away} prob={p.away_win_prob || 0} color="#3B82F6" active={p.predicted_winner === 'away'} />
+                  </div>
+                  <div className="text-xs text-text-muted">
+                    Total pts: <span className="text-text font-medium">{p.exp_total_points}</span>
+                    {p.pace && <> · Ritmo: <span className="text-text font-medium capitalize">{p.pace}</span></>}
+                  </div>
+                </div>
+              )
+            }}
+          />
+
+          {/* Tennis */}
+          <SportSection
+            title="Tenis ATP/WTA"
+            href="/tenis"
+            icon={Dumbbell}
+            color="text-tennis-orange"
+            accent="#F97316"
+            matches={topTennis}
+            renderMatch={(m) => {
+              const p = m.prediction || {}
+              const p1 = m.home_team?.name || 'P1'
+              const p2 = m.away_team?.name || 'P2'
+              return (
+                <div key={m.id} className="p-3 rounded-lg bg-surface-2/40 border border-surface-2/60 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs text-text-muted">{m.league} · {m.surface}</span>
+                    <ConfidenceBadge level={p.winner_confidence || 'baja'} />
+                  </div>
+                  <div className="text-sm font-semibold text-text truncate">{p1} vs {p2}</div>
+                  <div className="space-y-1">
+                    <ProbBar label={p1} prob={p.p1_win_prob || 0} color="#F97316" active={p.predicted_winner === 'p1'} />
+                    <ProbBar label={p2} prob={p.p2_win_prob || 0} color="#F97316" active={p.predicted_winner === 'p2'} />
+                  </div>
+                  <div className="text-xs text-text-muted">
+                    Sets: <span className="text-text font-medium">{p.most_likely_result || '2-1'}</span>
+                    {p.exp_total_games && <> · Juegos: <span className="text-text font-medium">{p.exp_total_games}</span></>}
+                  </div>
+                </div>
+              )
+            }}
+          />
         </div>
+      )}
+    </div>
+  )
+}
+
+function SportSection({
+  title, href, icon: Icon, color, matches, renderMatch
+}: {
+  title: string; href: string; icon: typeof Globe; color: string; accent: string; matches: any[];
+  renderMatch: (m: any) => React.ReactNode
+}) {
+  return (
+    <div className="card">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <Icon className={cn('w-5 h-5', color)} />
+          <h3 className="font-bold text-text">{title}</h3>
+          <span className="text-xs text-text-muted bg-surface-2 px-2 py-0.5 rounded-full">{matches.length}</span>
+        </div>
+        <Link href={href} className={cn('flex items-center gap-1 text-xs font-semibold hover:underline', color)}>
+          Ver todos <ChevronRight className="w-3 h-3" />
+        </Link>
       </div>
-
-      {/* Sport ROI Bar Chart & Heatmap */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="card">
-          <h3 className="section-title text-sm mb-4">ROI por Deporte</h3>
-          {sportData.some(d => d.won > 0 || d.lost > 0) ? (
-            <div className="h-[250px] w-full">
-              <ResponsiveContainer>
-                <BarChart data={sportData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#2A2A40" vertical={false} />
-                  <XAxis dataKey="name" stroke="#94A3B8" fontSize={12} tickLine={false} axisLine={false} />
-                  <YAxis stroke="#94A3B8" fontSize={12} tickLine={false} axisLine={false} tickFormatter={(v) => `${v}%`} />
-                  <RechartsTooltip cursor={{fill: '#2A2A40'}} contentStyle={{ backgroundColor: '#1A1A2E', borderColor: '#2A2A40', borderRadius: '8px' }} formatter={(val: number) => [`${val.toFixed(1)}%`, 'ROI']} />
-                  <Bar dataKey="roi" radius={[4,4,0,0]}>
-                    {sportData.map((entry, index) => <Cell key={`cell-${index}`} fill={entry.roi >= 0 ? entry.color : COLORS.danger} />)}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          ) : <p className="text-text-muted text-sm text-center py-10">Sin datos de ROI</p>}
+      {matches.length === 0 ? (
+        <div className="text-center py-8 text-text-muted text-sm">
+          <BarChart2 className="w-8 h-8 mx-auto mb-2 opacity-30" />
+          No hay partidos próximos
         </div>
-
-        <div className="card">
-          <h3 className="section-title text-sm mb-4">Actividad Reciente (P&L Heatmap)</h3>
-          {heatmapData.length === 0 ? <p className="text-text-muted text-sm text-center py-10">Sin registros recientes</p> : (
-            <div className="flex flex-wrap gap-1.5 justify-start pl-2">
-              {heatmapData.map((d: any, i) => (
-                <div 
-                  key={i} 
-                  title={`${d.date}: ${formatCOP(d.pl)}`}
-                  className={cn(
-                    "w-4 h-4 rounded-sm transition-transform hover:scale-125 cursor-pointer",
-                    d.pl > 50000 ? "bg-green-500" :
-                    d.pl > 0 ? "bg-green-500/50" :
-                    d.pl === 0 ? "bg-surface-2" :
-                    d.pl > -50000 ? "bg-red-500/50" : "bg-red-500"
-                  )}
-                />
-              ))}
-            </div>
-          )}
+      ) : (
+        <div className="space-y-3">
+          {matches.map(renderMatch)}
         </div>
-      </div>
+      )}
     </div>
   )
 }

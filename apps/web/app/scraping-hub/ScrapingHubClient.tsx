@@ -4,12 +4,12 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Activity, Play, RotateCcw, Trophy, Globe, Dumbbell,
   CheckCircle2, XCircle, Loader2, Terminal, Clock,
-  Database, Zap, Radio
+  Database, Zap, Radio, Clipboard, Save
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 type ScrapingStatus = 'idle' | 'running' | 'success' | 'error'
-type SportTab = 'nba' | 'football' | 'tennis'
+type SportTab = 'nba' | 'football' | 'tennis' | 'odds-import'
 
 interface LogLine {
   id:       number
@@ -28,6 +28,104 @@ interface ScrapeSection {
 }
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+
+// ---- NBA odds parser ----
+interface ParsedGame { home: string; away: string; homeOdd: number; awayOdd: number }
+
+const NBA_ALIASES: [string, string[]][] = [
+  ['Atlanta Hawks',           ['Hawks','Atlanta']],
+  ['Boston Celtics',          ['Celtics','Boston']],
+  ['Brooklyn Nets',           ['Nets','Brooklyn']],
+  ['Charlotte Hornets',       ['Hornets','Charlotte']],
+  ['Chicago Bulls',           ['Bulls','Chicago']],
+  ['Cleveland Cavaliers',     ['Cavaliers','Cleveland','Cavs']],
+  ['Dallas Mavericks',        ['Mavericks','Dallas','Mavs']],
+  ['Denver Nuggets',          ['Nuggets','Denver']],
+  ['Detroit Pistons',         ['Pistons','Detroit']],
+  ['Golden State Warriors',   ['Warriors','Golden State','GSW']],
+  ['Houston Rockets',         ['Rockets','Houston']],
+  ['Indiana Pacers',          ['Pacers','Indiana']],
+  ['Los Angeles Clippers',    ['Clippers','LA Clippers','L.A. Clippers']],
+  ['Los Angeles Lakers',      ['Lakers','LA Lakers','L.A. Lakers']],
+  ['Memphis Grizzlies',       ['Grizzlies','Memphis']],
+  ['Miami Heat',              ['Heat','Miami']],
+  ['Milwaukee Bucks',         ['Bucks','Milwaukee']],
+  ['Minnesota Timberwolves',  ['Timberwolves','Minnesota','Wolves']],
+  ['New Orleans Pelicans',    ['Pelicans','New Orleans']],
+  ['New York Knicks',         ['Knicks','New York','NYK']],
+  ['Oklahoma City Thunder',   ['Thunder','Oklahoma City','OKC']],
+  ['Orlando Magic',           ['Magic','Orlando']],
+  ['Philadelphia 76ers',      ['76ers','Philadelphia','Sixers','Philly']],
+  ['Phoenix Suns',            ['Suns','Phoenix']],
+  ['Portland Trail Blazers',  ['Trail Blazers','Portland','Blazers']],
+  ['Sacramento Kings',        ['Kings','Sacramento']],
+  ['San Antonio Spurs',       ['Spurs','San Antonio']],
+  ['Toronto Raptors',         ['Raptors','Toronto']],
+  ['Utah Jazz',               ['Jazz','Utah']],
+  ['Washington Wizards',      ['Wizards','Washington']],
+]
+
+function parseOddsText(rawInput: string): ParsedGame[] {
+  let text = rawInput
+  try {
+    if (typeof document !== 'undefined') {
+      const div = document.createElement('div')
+      div.innerHTML = rawInput
+      text = div.innerText || div.textContent || rawInput
+    }
+  } catch { text = rawInput.replace(/<[^>]+>/g, ' ') }
+
+  text = text.replace(/\s+/g, ' ')
+
+  type Hit = { pos: number; canonical: string }
+  const hits: Hit[] = []
+  for (const [canonical, aliases] of NBA_ALIASES) {
+    for (const alias of [canonical, ...aliases]) {
+      const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const re = new RegExp(`(?<![A-Za-z])${escaped}(?![A-Za-z])`, 'gi')
+      let m: RegExpExecArray | null
+      while ((m = re.exec(text)) !== null) {
+        if (!hits.some(h => h.canonical === canonical && Math.abs(h.pos - m!.index) < alias.length + 2)) {
+          hits.push({ pos: m.index, canonical })
+        }
+      }
+    }
+  }
+
+  // Deduplicate: keep first occurrence per team
+  const seen = new Set<string>()
+  const deduped: Hit[] = []
+  hits.sort((a, b) => a.pos - b.pos)
+  for (const h of hits) {
+    if (!seen.has(h.canonical)) { seen.add(h.canonical); deduped.push(h) }
+  }
+
+  // Find decimal odds (1.01–25.00), including comma decimals (e.g. 1,85)
+  type OddHit = { pos: number; value: number }
+  const allOdds: OddHit[] = []
+  const oddsRe = /\b(\d{1,2}[.,]\d{2})\b/g
+  let om: RegExpExecArray | null
+  while ((om = oddsRe.exec(text)) !== null) {
+    const val = parseFloat(om[1].replace(',', '.'))
+    if (val >= 1.01 && val <= 25) allOdds.push({ pos: om.index, value: val })
+  }
+
+  // For each team, grab the nearest odd within 300 chars after it
+  const teamOdds: { canonical: string; odd: number }[] = []
+  for (const team of deduped) {
+    const near = allOdds
+      .filter(o => o.pos > team.pos && o.pos < team.pos + 300)
+      .sort((a, b) => a.pos - b.pos)
+    if (near.length > 0) teamOdds.push({ canonical: team.canonical, odd: near[0].value })
+  }
+
+  // Pair consecutive teams as (home, away)
+  const games: ParsedGame[] = []
+  for (let i = 0; i + 1 < teamOdds.length; i += 2) {
+    games.push({ home: teamOdds[i].canonical, away: teamOdds[i+1].canonical, homeOdd: teamOdds[i].odd, awayOdd: teamOdds[i+1].odd })
+  }
+  return games
+}
 
 function StatusChip({ status }: { status: ScrapingStatus }) {
   const map = {
@@ -86,8 +184,221 @@ function LogTerminal({ logs }: { logs: LogLine[] }) {
   )
 }
 
+interface OddsManualEntryProps {
+  oddsSource: string; setOddsSource: (s: string) => void
+  importSaved: boolean; setImportSaved: (v: boolean) => void
+  todayGames: { id: string; home: string; away: string }[]
+  setTodayGames: (g: { id: string; home: string; away: string }[]) => void
+  gamesLoading: boolean; setGamesLoading: (v: boolean) => void
+  manualInputs: Record<string, { homeOdd: string; awayOdd: string }>
+  setManualInputs: (v: Record<string, { homeOdd: string; awayOdd: string }>) => void
+  existingOdds: { source: string; games: any[] } | null
+  setExistingOdds: (v: { source: string; games: any[] } | null) => void
+}
+
+function OddsManualEntry({
+  oddsSource, setOddsSource,
+  importSaved, setImportSaved,
+  todayGames, setTodayGames,
+  gamesLoading, setGamesLoading,
+  manualInputs, setManualInputs,
+  existingOdds, setExistingOdds,
+}: OddsManualEntryProps) {
+  useEffect(() => {
+    // Load existing saved odds
+    try {
+      const raw = localStorage.getItem('betiq_nba_odds')
+      if (raw) { const p = JSON.parse(raw); if (p?.games) setExistingOdds(p) }
+    } catch { /* ignore */ }
+
+    // Fetch today's games from ESPN
+    setGamesLoading(true)
+    fetch('/api/nba/matches')
+      .then(r => r.json())
+      .then(data => {
+        const games = (data.matches || []).map((m: any) => ({
+          id: m.id,
+          home: m.home_team?.name || '',
+          away: m.away_team?.name || '',
+        }))
+        setTodayGames(games)
+        // Pre-fill inputs from existing saved odds
+        try {
+          const raw = localStorage.getItem('betiq_nba_odds')
+          if (raw) {
+            const saved = JSON.parse(raw)
+            const inputs: Record<string, { homeOdd: string; awayOdd: string }> = {}
+            for (const g of games) {
+              const homeKey = g.home.split(' ').pop()?.toLowerCase() || ''
+              const match = (saved.games || []).find((sg: any) => {
+                const sh = sg.home.split(' ').pop()?.toLowerCase() || ''
+                const sa = sg.away.split(' ').pop()?.toLowerCase() || ''
+                return sh === homeKey || sa === homeKey
+              })
+              if (match) {
+                const reversed = match.home.split(' ').pop()?.toLowerCase() !== homeKey
+                inputs[g.id] = {
+                  homeOdd: reversed ? String(match.awayOdd) : String(match.homeOdd),
+                  awayOdd: reversed ? String(match.homeOdd) : String(match.awayOdd),
+                }
+              }
+            }
+            if (Object.keys(inputs).length > 0) setManualInputs(inputs)
+          }
+        } catch { /* ignore */ }
+      })
+      .catch(() => {})
+      .finally(() => setGamesLoading(false))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  function updateInput(id: string, field: 'homeOdd' | 'awayOdd', val: string) {
+    setManualInputs({ ...manualInputs, [id]: { ...(manualInputs[id] || { homeOdd: '', awayOdd: '' }), [field]: val } })
+    setImportSaved(false)
+  }
+
+  function saveOdds() {
+    const games = todayGames
+      .filter(g => manualInputs[g.id]?.homeOdd && manualInputs[g.id]?.awayOdd)
+      .map(g => ({
+        home: g.home, away: g.away,
+        homeOdd: parseFloat(manualInputs[g.id].homeOdd),
+        awayOdd: parseFloat(manualInputs[g.id].awayOdd),
+      }))
+      .filter(g => g.homeOdd >= 1.01 && g.awayOdd >= 1.01)
+    if (games.length === 0) return
+    const payload = { importedAt: new Date().toISOString(), source: oddsSource, games }
+    localStorage.setItem('betiq_nba_odds', JSON.stringify(payload))
+    setExistingOdds(payload)
+    setImportSaved(true)
+  }
+
+  const filledCount = todayGames.filter(g => manualInputs[g.id]?.homeOdd && manualInputs[g.id]?.awayOdd).length
+
+  return (
+    <div className="space-y-4">
+      {/* Header card */}
+      <div className="card">
+        <div className="flex items-center gap-2 mb-1">
+          <Clipboard className="w-4 h-4 text-accent" />
+          <h3 className="font-bold text-text">Cuotas Reales — Ingreso Manual</h3>
+        </div>
+        <p className="text-xs text-text-muted mb-4">
+          Abre Rushbet en paralelo, busca cada partido NBA y escribe las cuotas del ganador (formato decimal: 1.85). Pulsa Guardar cuando termines.
+        </p>
+
+        {/* Source */}
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-text-muted">Fuente:</span>
+          {['Rushbet', 'DraftKings', 'FanDuel', 'Betplay'].map(s => (
+            <button key={s} onClick={() => setOddsSource(s)}
+              className={cn('px-3 py-1 rounded-lg text-xs font-semibold transition-all',
+                oddsSource === s ? 'bg-accent text-white' : 'bg-surface-2 text-text-muted hover:text-text')}>
+              {s}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Games table */}
+      <div className="card">
+        <div className="flex items-center justify-between mb-4">
+          <h4 className="font-semibold text-text text-sm">
+            Partidos próximos {!gamesLoading && todayGames.length > 0 && `(${todayGames.length})`}
+          </h4>
+          {importSaved && (
+            <span className="badge badge-success flex items-center gap-1">
+              <CheckCircle2 className="w-3 h-3" /> Guardado — NBA actualizada
+            </span>
+          )}
+        </div>
+
+        {gamesLoading ? (
+          <div className="flex items-center justify-center py-8 text-text-muted gap-2">
+            <Loader2 className="w-5 h-5 animate-spin" />
+            <span className="text-sm">Cargando partidos de ESPN...</span>
+          </div>
+        ) : todayGames.length === 0 ? (
+          <div className="text-center py-8 text-text-muted text-sm">No hay partidos próximos en ESPN</div>
+        ) : (
+          <div className="space-y-2">
+            {/* Column headers */}
+            <div className="grid grid-cols-[1fr_80px_24px_80px_1fr] gap-2 text-xs text-text-muted font-semibold px-1 mb-1">
+              <span>Local</span>
+              <span className="text-center">Cuota L</span>
+              <span />
+              <span className="text-center">Cuota V</span>
+              <span className="text-right">Visitante</span>
+            </div>
+            {todayGames.map(g => {
+              const inp = manualInputs[g.id] || { homeOdd: '', awayOdd: '' }
+              const filled = inp.homeOdd && inp.awayOdd
+              return (
+                <div key={g.id} className={cn(
+                  'grid grid-cols-[1fr_80px_24px_80px_1fr] gap-2 items-center p-2 rounded-lg transition-all',
+                  filled ? 'bg-green-500/5 border border-green-500/20' : 'bg-surface-2/40'
+                )}>
+                  <span className="text-xs font-semibold text-text truncate">{g.home}</span>
+                  <input
+                    type="number" step="0.01" min="1.01" max="25" placeholder="1.85"
+                    value={inp.homeOdd}
+                    onChange={e => updateInput(g.id, 'homeOdd', e.target.value)}
+                    className="w-full bg-black/30 border border-surface-2 rounded-lg px-2 py-1.5 text-center text-sm text-accent font-bold focus:outline-none focus:border-accent/60 placeholder-text-muted/30"
+                  />
+                  <span className="text-center text-text-muted text-xs">vs</span>
+                  <input
+                    type="number" step="0.01" min="1.01" max="25" placeholder="1.85"
+                    value={inp.awayOdd}
+                    onChange={e => updateInput(g.id, 'awayOdd', e.target.value)}
+                    className="w-full bg-black/30 border border-surface-2 rounded-lg px-2 py-1.5 text-center text-sm text-accent font-bold focus:outline-none focus:border-accent/60 placeholder-text-muted/30"
+                  />
+                  <span className="text-xs font-semibold text-text truncate text-right">{g.away}</span>
+                </div>
+              )
+            })}
+          </div>
+        )}
+
+        {filledCount > 0 && (
+          <button onClick={saveOdds}
+            className="w-full mt-4 btn-primary flex items-center justify-center gap-2 py-2.5">
+            <Save className="w-4 h-4" />
+            Guardar {filledCount} partido{filledCount > 1 ? 's' : ''} en NBA
+          </button>
+        )}
+      </div>
+
+      {/* Show existing saved */}
+      {existingOdds && (
+        <div className="card bg-surface-2/30 border-surface-2/50">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-bold text-text-muted uppercase tracking-wider">Cuotas guardadas — {existingOdds.source}</span>
+            <button onClick={() => { localStorage.removeItem('betiq_nba_odds'); setExistingOdds(null); setManualInputs({}) }}
+              className="text-xs text-danger hover:text-danger/80">Borrar</button>
+          </div>
+          <div className="space-y-1">
+            {(existingOdds.games || []).map((g: any, i: number) => (
+              <div key={i} className="flex items-center justify-between text-xs">
+                <span className="text-text">{g.home}</span>
+                <span className="text-accent font-bold">{g.homeOdd?.toFixed(2)} / {g.awayOdd?.toFixed(2)}</span>
+                <span className="text-text">{g.away}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function ScrapingHubClient() {
   const [activeTab, setActiveTab] = useState<SportTab>('nba')
+  const [oddsSource,      setOddsSource]      = useState('Rushbet')
+  const [importSaved,     setImportSaved]     = useState(false)
+  const [todayGames,      setTodayGames]      = useState<{ id: string; home: string; away: string }[]>([])
+  const [gamesLoading,    setGamesLoading]    = useState(false)
+  const [manualInputs,    setManualInputs]    = useState<Record<string, { homeOdd: string; awayOdd: string }>>({})
+  const [existingOdds,    setExistingOdds]    = useState<{ source: string; games: any[] } | null>(null)
   const [logId, setLogId] = useState(0)
   const [sections, setSections] = useState<Record<string, ScrapeSection>>({
     nba_stats:      { id: 'nba_stats',      label: 'Estadísticas NBA',    status: 'idle', logs: [], count: null, lastRun: null },
@@ -200,9 +511,10 @@ export default function ScrapingHubClient() {
   }, [])
 
   const tabs = [
-    { id: 'nba' as SportTab,      label: 'NBA',    icon: Trophy,   color: 'text-nba-blue' },
-    { id: 'football' as SportTab, label: 'Fútbol', icon: Globe,    color: 'text-football-green' },
-    { id: 'tennis' as SportTab,   label: 'Tenis',  icon: Dumbbell, color: 'text-tennis-orange' },
+    { id: 'nba' as SportTab,          label: 'NBA',         icon: Trophy,     color: 'text-nba-blue' },
+    { id: 'football' as SportTab,     label: 'Fútbol',      icon: Globe,      color: 'text-football-green' },
+    { id: 'tennis' as SportTab,       label: 'Tenis',       icon: Dumbbell,   color: 'text-tennis-orange' },
+    { id: 'odds-import' as SportTab,  label: '📋 Cuotas',   icon: Clipboard,  color: 'text-accent' },
   ]
 
   return (
@@ -478,6 +790,24 @@ export default function ScrapingHubClient() {
             <LogTerminal logs={sections.football_train.logs} />
           </div>
         </div>
+      )}
+
+      {/* Odds Manual Entry Panel */}
+      {activeTab === 'odds-import' && (
+        <OddsManualEntry
+          oddsSource={oddsSource}
+          setOddsSource={setOddsSource}
+          importSaved={importSaved}
+          setImportSaved={setImportSaved}
+          todayGames={todayGames}
+          setTodayGames={setTodayGames}
+          gamesLoading={gamesLoading}
+          setGamesLoading={setGamesLoading}
+          manualInputs={manualInputs}
+          setManualInputs={setManualInputs}
+          existingOdds={existingOdds}
+          setExistingOdds={setExistingOdds}
+        />
       )}
 
       {/* Tennis Panel */}

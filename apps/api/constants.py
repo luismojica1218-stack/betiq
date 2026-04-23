@@ -1,5 +1,6 @@
 """
-BetIQ — Shared constants and configuration
+StatIQ — Shared constants and configuration
+Sports analytics platform — pure statistical insights
 """
 
 # ---- Sports ----
@@ -37,17 +38,10 @@ TENNIS_TOURNAMENTS = [
     "ATP Finals", "WTA Finals", "ATP 500", "WTA 500", "ATP 250", "WTA 250"
 ]
 
-# ---- Bookmakers ----
-BOOKMAKERS = ["rushbet", "betplay"]
-
-# ---- ML Thresholds ----
-MIN_EV_FIXED  = 0.05   # 5% EV mínimo para apuesta fija
-MIN_EV_PARLAY = 0.08   # 8% EV mínimo para incluir en parlay
-MIN_CONFIDENCE = 0.55  # Confianza mínima del modelo
-
-# ---- Kelly ----
-KELLY_FRACTION   = 0.25   # Kelly al 25%
-MAX_BET_PCT      = 0.20   # Máximo 20% del presupuesto en una sola apuesta
+# ---- Confidence thresholds (based on probability gap) ----
+CONFIDENCE_HIGH = 0.65   # p_winner > 65% -> "Alta"
+CONFIDENCE_MED  = 0.55   # p_winner > 55% -> "Media"
+# below 55% -> "Baja"
 
 # ---- Scraping ----
 REQUEST_DELAY_MIN = 1.0
