@@ -11,22 +11,67 @@ function rankToElo(rank: number): number {
   return Math.round(2500 - 65 * Math.log(Math.max(1, rank)))
 }
 
+// ── Hardcoded fallback rankings (ATP top 80, April 2025) ─────────────────────
+// Used when ESPN rankings API returns empty/wrong format
+const ATP_RANKS: Record<string, number> = {
+  'Jannik Sinner': 1, 'Alexander Zverev': 2, 'Carlos Alcaraz': 3,
+  'Novak Djokovic': 4, 'Taylor Fritz': 5, 'Jack Draper': 6,
+  'Casper Ruud': 7, 'Andrey Rublev': 8, 'Tommy Paul': 9,
+  'Alex de Minaur': 10, 'Holger Rune': 11, 'Grigor Dimitrov': 12,
+  'Stefanos Tsitsipas': 13, 'Hubert Hurkacz': 14, 'Ugo Humbert': 15,
+  'Felix Auger-Aliassime': 16, 'Sebastian Korda': 17, 'Francisco Cerundolo': 18,
+  'Ben Shelton': 19, 'Tomas Machac': 20, 'Lorenzo Musetti': 21,
+  'Alexei Popyrin': 22, 'Nicolas Jarry': 23, 'Tallon Griekspoor': 24,
+  'Jiri Lehecka': 25, 'Karen Khachanov': 26, 'Miomir Kecmanovic': 27,
+  'Cameron Norrie': 28, 'Sebastian Baez': 29, 'Matteo Berrettini': 30,
+  'Alejandro Davidovich Fokina': 31, 'Arthur Fils': 32, 'Gael Monfils': 33,
+  'Jan-Lennard Struff': 34, 'Alexander Bublik': 35, 'Luciano Darderi': 36,
+  'Mariano Navone': 37, 'Brandon Nakashima': 38, 'Flavio Cobolli': 39,
+  'Nuno Borges': 40, 'Jakub Mensik': 41, 'Mattia Bellucci': 42,
+  'Laslo Djere': 43, 'Marcos Giron': 44, 'Quentin Halys': 45,
+  'Maximilian Marterer': 46, 'Joao Fonseca': 47, 'Hamad Medjedovic': 48,
+  'Facundo Diaz Acosta': 49, 'Benjamin Bonzi': 50, 'Vit Kopriva': 60,
+  'Thiago Agustin Tirante': 65, 'Rafael Jodar': 90, 'Dominic Thiem': 70,
+  'Botic van de Zandschulp': 55, 'Sumit Nagal': 80,
+}
+
+const WTA_RANKS: Record<string, number> = {
+  'Aryna Sabalenka': 1, 'Iga Swiatek': 2, 'Coco Gauff': 3,
+  'Elena Rybakina': 4, 'Jessica Pegula': 5, 'Madison Keys': 6,
+  'Emma Navarro': 7, 'Mirra Andreeva': 8, 'Daria Kasatkina': 9,
+  'Paula Badosa': 10, 'Barbora Krejcikova': 11, 'Jasmine Paolini': 12,
+  'Diana Shnaider': 13, 'Anna Kalinskaya': 14, 'Liudmila Samsonova': 15,
+  'Elina Svitolina': 16, 'Marta Kostyuk': 17, 'Beatriz Haddad Maia': 18,
+  'Caroline Wozniacki': 19, 'Karolina Muchova': 20, 'Ekaterina Alexandrova': 21,
+  'Viktoria Hruncakova': 22, 'Clara Tauson': 23, 'Donna Vekic': 24,
+  'Xinyu Wang': 25, 'Qinwen Zheng': 26, 'Yulia Putintseva': 27,
+  'Magda Linette': 28, 'Katerina Siniakova': 29, 'Oceane Dodin': 30,
+  'Eva Lys': 35, 'Laura Siegemund': 38, 'Tatjana Maria': 45,
+  'Emma Raducanu': 50, 'Sorana Cirstea': 40,
+}
+
 // ── Surface adjustment (per-player, evidence-based) ──────────────────────────
 const CLAY_BOOST: Record<string, number> = {
-  'Carlos Alcaraz': 25, 'Casper Ruud': 30, 'Sebastian Baez': 35,
-  'Francisco Cerundolo': 30, 'Holger Rune': 15, 'Lorenzo Musetti': 20,
-  'Iga Swiatek': 50, 'Beatriz Haddad Maia': 25,
+  'Carlos Alcaraz': 30, 'Casper Ruud': 35, 'Sebastian Baez': 40,
+  'Francisco Cerundolo': 35, 'Holger Rune': 20, 'Lorenzo Musetti': 25,
+  'Iga Swiatek': 55, 'Beatriz Haddad Maia': 30, 'Jannik Sinner': 10,
+  'Alexander Zverev': 20, 'Rafael Nadal': 80, 'Alejandro Davidovich Fokina': 25,
+  'Mariano Navone': 30, 'Facundo Diaz Acosta': 25, 'Nicolas Jarry': 15,
+  'Jasmine Paolini': 20, 'Paula Badosa': 15, 'Karolina Muchova': 10,
 }
 const GRASS_BOOST: Record<string, number> = {
-  'Carlos Alcaraz': 35, 'Hubert Hurkacz': 25, 'Novak Djokovic': 30,
-  'Daniil Medvedev': -25, 'Iga Swiatek': -15, 'Emma Raducanu': 20,
+  'Carlos Alcaraz': 35, 'Hubert Hurkacz': 30, 'Novak Djokovic': 30,
+  'Daniil Medvedev': -30, 'Iga Swiatek': -20, 'Emma Raducanu': 25,
+  'Taylor Fritz': 15, 'Cameron Norrie': 20,
 }
 const HARD_BOOST: Record<string, number> = {
-  'Daniil Medvedev': 20, 'Jannik Sinner': 15, 'Aryna Sabalenka': 20,
-  'Jessica Pegula': 15, 'Madison Keys': 15,
+  'Daniil Medvedev': 25, 'Jannik Sinner': 20, 'Aryna Sabalenka': 25,
+  'Jessica Pegula': 20, 'Madison Keys': 20, 'Taylor Fritz': 15,
+  'Ben Shelton': 15, 'Alex de Minaur': 10,
 }
 const CLAY_PENALTY: Record<string, number> = {
-  'Daniil Medvedev': -20, 'Nick Kyrgios': -15,
+  'Daniil Medvedev': -30, 'Nick Kyrgios': -20, 'Jack Draper': -10,
+  'Ben Shelton': -10,
 }
 
 function surfaceAdjustedElo(elo: number, name: string, surface: string): number {
@@ -64,24 +109,58 @@ async function espnFetch(url: string): Promise<any> {
 }
 
 // ── Fetch live rankings from ESPN → build name → Elo map ─────────────────────
-async function fetchRankings(url: string): Promise<Record<string, number>> {
-  const data = await espnFetch(url)
+async function fetchRankings(url: string, fallback: Record<string, number>): Promise<Record<string, number>> {
+  // Start with hardcoded fallback so we always have data
   const rankMap: Record<string, number> = {}
-  if (!data) return rankMap
-  const rankings = data.rankings || data.athletes || []
-  for (const r of rankings) {
-    const name = r.athlete?.displayName || r.displayName || ''
-    const rank = r.currentRank || r.rank || 0
-    if (name && rank) rankMap[name] = rankToElo(rank)
+  for (const [name, rank] of Object.entries(fallback)) {
+    rankMap[name] = rankToElo(rank)
   }
+
+  // Try to enrich with live ESPN data
+  const data = await espnFetch(url)
+  if (!data) return rankMap
+
+  // ESPN can return several different shapes — try all of them
+  const candidates: any[] = [
+    ...(data.rankings    || []),
+    ...(data.athletes    || []),
+    ...(data.items       || []),
+    ...(Array.isArray(data) ? data : []),
+  ]
+  // Also look inside nested "rankings[].entries[]" shape
+  for (const r of (data.rankings || [])) {
+    for (const entry of (r.entries || [])) {
+      candidates.push(entry)
+    }
+  }
+
+  let liveCount = 0
+  for (const r of candidates) {
+    const name = (
+      r.athlete?.displayName ||
+      r.athlete?.fullName    ||
+      r.displayName          ||
+      r.fullName             || ''
+    ).trim()
+    const rank = +(r.currentRank || r.ranking?.currentRank || r.rank || 0)
+    if (name && rank > 0) {
+      rankMap[name] = rankToElo(rank)
+      liveCount++
+    }
+  }
+  console.log(`[tennis rankings] live=${liveCount} total=${Object.keys(rankMap).length}`)
   return rankMap
 }
 
 function getElo(name: string, rankMap: Record<string, number>, defaultElo: number): number {
   if (rankMap[name]) return rankMap[name]
-  // Fuzzy match on last name
-  const last = name.split(' ').pop()?.toLowerCase() || ''
-  const key  = Object.keys(rankMap).find(k => k.toLowerCase().includes(last))
+  // Fuzzy match: try full last name, then partial
+  const parts = name.toLowerCase().split(' ')
+  const last  = parts[parts.length - 1]
+  const key   = Object.keys(rankMap).find(k => {
+    const kl = k.toLowerCase()
+    return kl.endsWith(last) || kl.includes(last)
+  })
   return key ? rankMap[key] : defaultElo
 }
 
@@ -230,8 +309,8 @@ async function fetchTour(
 export async function GET() {
   try {
     const [atpRanks, wtaRanks] = await Promise.all([
-      fetchRankings(ESPN_ATP_RANKINGS),
-      fetchRankings(ESPN_WTA_RANKINGS),
+      fetchRankings(ESPN_ATP_RANKINGS, ATP_RANKS),
+      fetchRankings(ESPN_WTA_RANKINGS, WTA_RANKS),
     ])
 
     const [atp, wta] = await Promise.all([
