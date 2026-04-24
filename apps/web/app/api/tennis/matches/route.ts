@@ -30,9 +30,15 @@ const ATP_RANKS: Record<string, number> = {
   'Nuno Borges': 40, 'Jakub Mensik': 41, 'Mattia Bellucci': 42,
   'Laslo Djere': 43, 'Marcos Giron': 44, 'Quentin Halys': 45,
   'Maximilian Marterer': 46, 'Joao Fonseca': 47, 'Hamad Medjedovic': 48,
-  'Facundo Diaz Acosta': 49, 'Benjamin Bonzi': 50, 'Vit Kopriva': 60,
-  'Thiago Agustin Tirante': 65, 'Rafael Jodar': 90, 'Dominic Thiem': 70,
-  'Botic van de Zandschulp': 55, 'Sumit Nagal': 80,
+  'Facundo Diaz Acosta': 49, 'Benjamin Bonzi': 50,
+  'Botic van de Zandschulp': 51, 'Vit Kopriva': 55,
+  'Alejandro Tabilo': 56, 'Alex Michelsen': 57, 'Dino Prizmic': 58,
+  'Gabriel Diallo': 62, 'Tomas Martin Etcheverry': 63,
+  'Thiago Agustin Tirante': 68, 'Arthur Rinderknech': 70,
+  'Valentin Vacherot': 75, 'Dusan Lajovic': 76, 'Damir Dzumhur': 80,
+  'Emilio Nava': 85, 'Rafael Jodar': 92, 'Dominic Thiem': 78,
+  'Sumit Nagal': 88, 'Ignacio Buse': 72, 'Sebastian Ofner': 60,
+  'Elmer Moller': 120,
 }
 
 const WTA_RANKS: Record<string, number> = {
@@ -173,11 +179,18 @@ function eloWinProb(eloA: number, eloB: number): number {
 function computeTennis(
   p1Name: string, p2Name: string,
   tour: string, surface: string, matchId: string,
-  rankMap: Record<string, number>
+  rankMap: Record<string, number>,
+  p1DirectRank?: number,   // ranking from scoreboard competitor data
+  p2DirectRank?: number,
 ) {
   const defaultElo = tour === 'WTA' ? 2060 : 2050
-  const rawElo1 = getElo(p1Name, rankMap, defaultElo)
-  const rawElo2 = getElo(p2Name, rankMap, defaultElo)
+  // Priority: direct rank from scoreboard > rankMap lookup > default
+  const rawElo1 = p1DirectRank
+    ? rankToElo(p1DirectRank)
+    : getElo(p1Name, rankMap, defaultElo)
+  const rawElo2 = p2DirectRank
+    ? rankToElo(p2DirectRank)
+    : getElo(p2Name, rankMap, defaultElo)
   const elo1    = surfaceAdjustedElo(rawElo1, p1Name, surface)
   const elo2    = surfaceAdjustedElo(rawElo2, p2Name, surface)
 
@@ -265,9 +278,22 @@ async function fetchTour(
         if (seen.has(key)) continue
         seen.add(key)
 
+        // Extract ranking directly from scoreboard data (most reliable source)
+        // ESPN embeds athlete.ranking, athlete.seed, or competitor seed in the scoreboard
+        const p1DirectRank: number | undefined =
+          p1Comp.athlete?.ranking ||
+          p1Comp.athlete?.rank    ||
+          (p1Comp.seed ? +p1Comp.seed : undefined) ||
+          undefined
+        const p2DirectRank: number | undefined =
+          p2Comp.athlete?.ranking ||
+          p2Comp.athlete?.rank    ||
+          (p2Comp.seed ? +p2Comp.seed : undefined) ||
+          undefined
+
         const roundName = comp.type?.text || 'Round'
         const matchId   = comp.id || e.id
-        const calc      = computeTennis(p1Name, p2Name, tourName, surface, matchId, rankMap)
+        const calc      = computeTennis(p1Name, p2Name, tourName, surface, matchId, rankMap, p1DirectRank, p2DirectRank)
 
         matches.push({
           id:         matchId,
