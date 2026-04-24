@@ -99,10 +99,11 @@ function ProbBar({ label, prob, highlight, color = 'bg-football-green' }: {
 
 // ---- Main component ---------------------------------------------------------
 export default function FutbolClient() {
-  const [activeLeague, setActiveLeague] = useState('all')
-  const [activeView,   setActiveView]   = useState<AnalysisView>('resultado')
-  const [liveMatches,  setLiveMatches]  = useState<MappedMatch[]>([])
-  const [isLoading,    setIsLoading]    = useState(true)
+  const [activeLeague,     setActiveLeague]     = useState('all')
+  const [activeView,       setActiveView]       = useState<AnalysisView>('resultado')
+  const [activeConfidence, setActiveConfidence] = useState<'all' | 'alta' | 'media' | 'baja'>('all')
+  const [liveMatches,      setLiveMatches]      = useState<MappedMatch[]>([])
+  const [isLoading,        setIsLoading]        = useState(true)
 
   useEffect(() => {
     async function fetchMatches() {
@@ -149,9 +150,11 @@ export default function FutbolClient() {
     fetchMatches()
   }, [])
 
-  const filtered = liveMatches.filter(m =>
-    activeLeague === 'all' || m.league === activeLeague
-  )
+  const filtered = liveMatches.filter(m => {
+    if (activeLeague !== 'all' && m.league !== activeLeague) return false
+    if (activeConfidence !== 'all' && m.pred.winner_confidence !== activeConfidence) return false
+    return true
+  })
 
   const winnerLabel = (w: 'home' | 'draw' | 'away', homeTeam: string, awayTeam: string) => {
     if (w === 'home') return `Local (${homeTeam})`
@@ -195,6 +198,30 @@ export default function FutbolClient() {
             </button>
           ))}
         </div>
+      </div>
+
+      {/* Confidence filter */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-xs text-text-muted font-medium">Confianza:</span>
+        {([
+          ['all',   'Todas',  'bg-surface text-text'],
+          ['alta',  'Alta',   'bg-success/15 text-success'],
+          ['media', 'Media',  'bg-warning/15 text-warning'],
+          ['baja',  'Baja',   'bg-surface-2 text-text-muted'],
+        ] as const).map(([val, label, activeClass]) => (
+          <button
+            key={val}
+            onClick={() => setActiveConfidence(val)}
+            className={cn(
+              'px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all',
+              activeConfidence === val
+                ? activeClass + ' border-transparent shadow-sm'
+                : 'bg-surface-2/40 text-text-muted border-transparent hover:text-text'
+            )}
+          >
+            {label}
+          </button>
+        ))}
       </div>
 
       {/* Analysis view selector */}

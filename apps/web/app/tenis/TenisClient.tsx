@@ -101,11 +101,12 @@ function ProbBar({ label, prob, highlight, accentColor = 'bg-tennis-orange' }: {
 
 // ---- Main component ---------------------------------------------------------
 export default function TenisClient() {
-  const [activeTour,    setActiveTour]    = useState('all')
-  const [activeSurface, setActiveSurface] = useState('all')
-  const [activeView,    setActiveView]    = useState<AnalysisView>('ganador')
-  const [liveMatches,   setLiveMatches]   = useState<MappedMatch[]>([])
-  const [isLoading,     setIsLoading]     = useState(true)
+  const [activeTour,       setActiveTour]       = useState('all')
+  const [activeSurface,    setActiveSurface]    = useState('all')
+  const [activeView,       setActiveView]       = useState<AnalysisView>('ganador')
+  const [activeConfidence, setActiveConfidence] = useState<'all' | 'alta' | 'media' | 'baja'>('all')
+  const [liveMatches,      setLiveMatches]      = useState<MappedMatch[]>([])
+  const [isLoading,        setIsLoading]        = useState(true)
 
   useEffect(() => {
     async function fetchMatches() {
@@ -160,8 +161,9 @@ export default function TenisClient() {
   }, [])
 
   const filtered = liveMatches.filter(m => {
-    if (activeTour    !== 'all' && m.tour    !== activeTour)    return false
-    if (activeSurface !== 'all' && m.surface !== activeSurface) return false
+    if (activeTour       !== 'all' && m.tour                    !== activeTour)       return false
+    if (activeSurface    !== 'all' && m.surface                 !== activeSurface)    return false
+    if (activeConfidence !== 'all' && m.pred.winner_confidence  !== activeConfidence) return false
     return true
   })
 
@@ -215,6 +217,30 @@ export default function TenisClient() {
             </button>
           ))}
         </div>
+      </div>
+
+      {/* Confidence filter */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-xs text-text-muted font-medium">Confianza:</span>
+        {([
+          ['all',   'Todas',  'bg-surface text-text'],
+          ['alta',  'Alta',   'bg-success/15 text-success'],
+          ['media', 'Media',  'bg-warning/15 text-warning'],
+          ['baja',  'Baja',   'bg-surface-2 text-text-muted'],
+        ] as const).map(([val, label, activeClass]) => (
+          <button
+            key={val}
+            onClick={() => setActiveConfidence(val)}
+            className={cn(
+              'px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all',
+              activeConfidence === val
+                ? activeClass + ' border-transparent shadow-sm'
+                : 'bg-surface-2/40 text-text-muted border-transparent hover:text-text'
+            )}
+          >
+            {label}
+          </button>
+        ))}
       </div>
 
       {/* Analysis view selector */}
