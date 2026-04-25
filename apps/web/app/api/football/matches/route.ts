@@ -12,6 +12,7 @@ const LEAGUE_PARAMS: Record<string, { avgHome: number; avgAway: number; rho: num
   'uefa.champions':        { avgHome: 1.55, avgAway: 1.10, rho: -0.12 },
   'conmebol.libertadores': { avgHome: 1.45, avgAway: 0.95, rho: -0.10 },
   'conmebol.sudamericana': { avgHome: 1.40, avgAway: 0.90, rho: -0.10 },
+  'col.1':                 { avgHome: 1.38, avgAway: 1.00, rho: -0.09 },
 }
 const DEFAULT_PARAMS = { avgHome: 1.42, avgAway: 1.05, rho: -0.11 }
 
@@ -24,6 +25,7 @@ const LEAGUES: Array<{ key: string; name: string; espnSlug: string }> = [
   { key: 'ligue-1',          name: 'Ligue 1',           espnSlug: 'fra.1'                  },
   { key: 'libertadores',     name: 'Copa Libertadores', espnSlug: 'conmebol.libertadores'  },
   { key: 'copa-sudamericana',name: 'Copa Sudamericana', espnSlug: 'conmebol.sudamericana'  },
+  { key: 'liga-colombiana',  name: 'Liga BetPlay',     espnSlug: 'col.1'                  },
 ]
 
 async function espnFetch(url: string): Promise<any> {

@@ -15,6 +15,7 @@ const LEAGUES = [
   { key: 'champions-league', name: 'Champions',       flag: '⭐', color: 'text-yellow-300' },
   { key: 'libertadores',     name: 'Libertadores',    flag: '🌎', color: 'text-green-400' },
   { key: 'copa-sudamericana',name: 'Sudamericana',   flag: '🏆', color: 'text-orange-400' },
+  { key: 'liga-colombiana',  name: 'Liga BetPlay',   flag: '🇨🇴', color: 'text-yellow-500' },
   { key: 'world-cup-2026',   name: 'Mundial 2026',    flag: '🌐', color: 'text-accent' },
 ]
 
@@ -64,6 +65,7 @@ function leagueSlug(raw: string): string {
   if (s.includes('bundesliga'))    return 'bundesliga'
   if (s.includes('serie') && s.includes('a')) return 'serie-a'
   if (s.includes('ligue'))         return 'ligue-1'
+  if (s.includes('betplay') || s.includes('colombian') || s.includes('col.1')) return 'liga-colombiana'
   if (s.includes('liga') || s.includes('laliga')) return 'la-liga'
   return s || 'all'
 }
