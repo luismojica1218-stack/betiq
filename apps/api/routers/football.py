@@ -15,6 +15,8 @@ from fastapi.responses import StreamingResponse
 from scrapers.football_scraper import run_football_stats_scrape
 from models.football_model import get_football_predictor
 from services.supabase_client import get_supabase
+from scrapers.news_scraper import NewsScraper
+from scrapers.weather_scraper import WeatherScraper
 from constants import FOOTBALL_LEAGUES
 
 router = APIRouter()
@@ -230,10 +232,20 @@ async def predict_football_match(match_id: str):
 
     home_stats = get_team_stats(match["home_team_id"])
     away_stats = get_team_stats(match["away_team_id"])
+    
+    news_scraper = NewsScraper()
+    weather_scraper = WeatherScraper()
+    
+    home_news = await news_scraper.get_team_news_sentiment(match["home_team"]["name"])
+    away_news = await news_scraper.get_team_news_sentiment(match["away_team"]["name"])
+    weather = await weather_scraper.get_weather(match["league"], match["home_team"]["name"])
 
     match_data = {
         "home_stats":       home_stats,
         "away_stats":       away_stats,
+        "home_news":        home_news,
+        "away_news":        away_news,
+        "weather":          weather,
         "h2h":              {},
         "league_avg_goals": 1.4,
         "league_strength":  0.5,

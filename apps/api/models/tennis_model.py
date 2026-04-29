@@ -39,18 +39,20 @@ FEATURE_NAMES = [
     "p1_hard_pct", "p1_clay_pct", "p1_grass_pct",
     "p1_recent_win_pct", "p1_recent_sets_ratio",
     "p1_recent_aces_per_game", "p1_fatigue_days",
-    "p1_ranking",
+    "p1_ranking", "p1_news_sentiment",
     # Player 2
     "p2_elo", "p2_surface_elo", "p2_surface_win_pct",
     "p2_hard_pct", "p2_clay_pct", "p2_grass_pct",
     "p2_recent_win_pct", "p2_recent_sets_ratio",
     "p2_recent_aces_per_game", "p2_fatigue_days",
-    "p2_ranking",
+    "p2_ranking", "p2_news_sentiment",
     # H2H & context
     "h2h_p1_wins", "h2h_total",
     "elo_diff", "surface_elo_diff",
     "surface_code",  # 0=hard, 1=clay, 2=grass, 3=indoor
     "is_grand_slam",
+    # Weather
+    "weather_rain", "weather_wind",
 ]
 
 SURFACE_MAP = {"hard": 0, "clay": 1, "grass": 2, "indoor": 3, "carpet": 3}
@@ -182,6 +184,24 @@ class TennisPredictor:
         p2_elo      = self.elo_engine.get_global(p2) or float(p2s.get("elo", 1500))
         p1_surf_elo = self.elo_engine.get(p1, surf)  or float(p1s.get("surface_elo", p1_elo))
         p2_surf_elo = self.elo_engine.get(p2, surf)  or float(p2s.get("surface_elo", p2_elo))
+        
+        # Adjust Elo based on news sentiment
+        p1_news = match_data.get("p1_news", {}).get("sentiment_score", 0.0)
+        p2_news = match_data.get("p2_news", {}).get("sentiment_score", 0.0)
+        
+        p1_surf_elo += p1_news * 20 # Up to 20 elo points boost/penalty
+        p2_surf_elo += p2_news * 20
+        
+        # Weather adjustments
+        w_rain = match_data.get("weather", {}).get("rain_mm", 0.0)
+        w_wind = match_data.get("weather", {}).get("wind_kmh", 10.0)
+        
+        # High wind favors the player with higher baseline elo (less variance)
+        if w_wind > 25.0:
+            if p1_elo > p2_elo:
+                p1_surf_elo += 10
+            else:
+                p2_surf_elo += 10
 
         p_elo_global  = elo_win_prob(p1_elo, p2_elo)
         p_elo_surface = elo_win_prob(p1_surf_elo, p2_surf_elo)
@@ -195,17 +215,17 @@ class TennisPredictor:
                 p1s.get("hard_pct", 0.5),    p1s.get("clay_pct", 0.5),  p1s.get("grass_pct", 0.5),
                 p1s.get("recent_win_pct", 0.5), p1s.get("sets_ratio", 1.0),
                 p1s.get("aces_per_game", 0.5), p1s.get("fatigue_days", 3),
-                float(p1s.get("ranking", 50)),
+                float(p1s.get("ranking", 50)), float(p1_news),
                 p2_elo, p2_surf_elo,
                 p2s.get("surface_win_pct", 0.5),
                 p2s.get("hard_pct", 0.5),    p2s.get("clay_pct", 0.5),  p2s.get("grass_pct", 0.5),
                 p2s.get("recent_win_pct", 0.5), p2s.get("sets_ratio", 1.0),
                 p2s.get("aces_per_game", 0.5), p2s.get("fatigue_days", 3),
-                float(p2s.get("ranking", 100)),
+                float(p2s.get("ranking", 100)), float(p2_news),
                 float(h2h.get("p1_wins", 0)), float(h2h_total),
                 p1_elo - p2_elo, p1_surf_elo - p2_surf_elo,
                 float(SURFACE_MAP.get(surf, 0)),
-                float(is_gs),
+                float(is_gs), float(w_rain), float(w_wind),
             ]])
             if self.scaler:
                 feats = self.scaler.transform(feats)
@@ -291,7 +311,12 @@ class TennisPredictor:
             "exp_total_games": exp_total_games,
             "p_over_22_5":     p_over_22_5,
             "p_under_22_5":    p_under_22_5,
-            "model_version":   "v4.0-elo-stats",
+            # News & Context details for UI display
+            "p1_news":         match_data.get("p1_news", {}),
+            "p2_news":         match_data.get("p2_news", {}),
+            "weather":         match_data.get("weather", {}),
+            "h2h_history":     match_data.get("h2h", {}),
+            "model_version":   "v6.0-elo-stats-news-weather",
         }
 
     async def bootstrap_training(self, log_queue: Optional[asyncio.Queue] = None) -> dict:
@@ -331,9 +356,20 @@ class TennisPredictor:
             h2h_tot     = h2h_p1 + np.random.randint(0, 15)
             elo_diff    = p1_elo - p2_elo
             selo_diff   = p1_surf_elo - p2_surf_elo
+            p1_news     = np.random.uniform(-1.0, 1.0)
+            p2_news     = np.random.uniform(-1.0, 1.0)
+            w_rain      = np.random.exponential(1.0)
+            w_wind      = np.random.normal(15.0, 5.0)
 
-            # Label based on Elo surface — no implied odds
-            p_win = elo_win_prob(p1_surf_elo, p2_surf_elo)
+            # Label based on Elo surface and news sentiment
+            # High wind favors the better player
+            p1_adj_elo = p1_surf_elo + p1_news * 20
+            p2_adj_elo = p2_surf_elo + p2_news * 20
+            if w_wind > 25.0:
+                if p1_elo > p2_elo: p1_adj_elo += 10
+                else: p2_adj_elo += 10
+            
+            p_win = elo_win_prob(p1_adj_elo, p2_adj_elo)
             # 0 = P1 wins straight, 1 = P1 wins in sets, 2 = P2 wins
             r = np.random.random()
             if r < p_win * 0.55:
@@ -343,17 +379,17 @@ class TennisPredictor:
             else:
                 label = 2   # P2 wins
 
-            # 28 features — no imp1/imp2
+            # 32 features
             X.append([
                 p1_elo, p1_surf_elo, p1_surf_pct,
                 p1_surf_pct * 0.9, p1_surf_pct * 0.7, p1_surf_pct * 0.8,
-                p1_rec, p1_sets, p1_aces, float(p1_fat), float(p1_rank),
+                p1_rec, p1_sets, p1_aces, float(p1_fat), float(p1_rank), p1_news,
                 p2_elo, p2_surf_elo, p2_surf_pct,
                 p2_surf_pct * 0.9, p2_surf_pct * 0.7, p2_surf_pct * 0.8,
-                p2_rec, p2_sets, p2_aces, float(p2_fat), float(p2_rank),
+                p2_rec, p2_sets, p2_aces, float(p2_fat), float(p2_rank), p2_news,
                 float(h2h_p1), float(h2h_tot),
                 elo_diff, selo_diff,
-                float(surf_code), float(is_gs),
+                float(surf_code), float(is_gs), float(w_rain), float(w_wind)
             ])
             y.append(label)
 

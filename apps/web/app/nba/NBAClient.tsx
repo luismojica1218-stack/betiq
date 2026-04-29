@@ -6,7 +6,7 @@ import { cn } from '@/lib/utils'
 
 // ---- Types ------------------------------------------------------------------
 type FilterDate   = 'today' | 'tomorrow' | '7days'
-type AnalysisView = 'ganador' | 'puntos' | 'estadisticas'
+type AnalysisView = 'ganador' | 'puntos' | 'estadisticas' | 'noticias'
 
 interface PointsRange {
   under_210: number
@@ -32,6 +32,11 @@ interface NbaPrediction {
   top_scoring_team: 'home' | 'away'
   pace: 'rapido' | 'moderado' | 'lento'
   blowout_probability: number
+  home_news?: any
+  away_news?: any
+  home_injuries?: any
+  away_injuries?: any
+  h2h_history?: any
 }
 
 interface MappedMatch {
@@ -122,6 +127,11 @@ function mapMatches(rawMatches: any[]): MappedMatch[] {
         top_scoring_team:   pred.top_scoring_team ?? 'home',
         pace:               pred.pace ?? 'moderado',
         blowout_probability: pred.blowout_probability ?? 0.18,
+        home_news:          pred.home_news,
+        away_news:          pred.away_news,
+        home_injuries:      pred.home_injuries,
+        away_injuries:      pred.away_injuries,
+        h2h_history:        pred.h2h_history,
       },
     }
   })
@@ -217,6 +227,7 @@ export default function NBAClient() {
             ['ganador',       'Ganador',     BarChart2],
             ['puntos',        'Puntos',      Activity],
             ['estadisticas',  'Estadísticas', Users],
+            ['noticias',      'Noticias',    Activity],
           ] as [AnalysisView, string, React.ElementType][]).map(([val, label, Icon]) => (
             <button
               key={val}
@@ -363,6 +374,62 @@ export default function NBAClient() {
                   <div className="flex flex-wrap gap-2 pt-1">
                     <ConfidenceBadge level={p.winner_confidence} />
                     <PaceBadge pace={p.pace} />
+                  </div>
+                </div>
+              )}
+
+              {/* ── Noticias view ── */}
+              {activeView === 'noticias' && (
+                <div className="space-y-4">
+                  {/* Home News */}
+                  <div className="bg-surface-2/40 rounded-lg p-3 space-y-2 border border-surface-2">
+                    <div className="flex justify-between items-center">
+                      <span className="font-bold text-xs text-text">{match.homeTeam}</span>
+                      <div className="flex gap-2">
+                        {p.home_injuries?.status && (
+                           <span className={cn('text-[10px] px-2 py-0.5 rounded font-semibold', 
+                             p.home_injuries.impact_score > 0.6 ? 'bg-red-500/20 text-red-400' :
+                             p.home_injuries.impact_score > 0.2 ? 'bg-warning/20 text-warning' : 'bg-surface text-text-muted')}>
+                             🏥 {p.home_injuries.status}
+                           </span>
+                        )}
+                        <span className={cn('text-xs px-2 py-0.5 rounded font-semibold', 
+                          p.home_news?.sentiment_label === 'Positivo' ? 'bg-green-500/20 text-green-400' : 
+                          p.home_news?.sentiment_label === 'Negativo' ? 'bg-red-500/20 text-red-400' : 'bg-surface-2 text-text-muted')}>
+                          {p.home_news?.sentiment_label || 'Neutral'}
+                        </span>
+                      </div>
+                    </div>
+                    {p.home_news?.headlines?.length > 0 ? (
+                      <ul className="text-xs text-text-muted list-disc list-inside space-y-1">
+                        {p.home_news.headlines.map((h: string, i: number) => <li key={i} className="truncate">{h}</li>)}
+                      </ul>
+                    ) : <p className="text-xs text-text-muted italic">Sin noticias recientes</p>}
+                  </div>
+                  {/* Away News */}
+                  <div className="bg-surface-2/40 rounded-lg p-3 space-y-2 border border-surface-2">
+                    <div className="flex justify-between items-center">
+                      <span className="font-bold text-xs text-text">{match.awayTeam}</span>
+                      <div className="flex gap-2">
+                        {p.away_injuries?.status && (
+                           <span className={cn('text-[10px] px-2 py-0.5 rounded font-semibold', 
+                             p.away_injuries.impact_score > 0.6 ? 'bg-red-500/20 text-red-400' :
+                             p.away_injuries.impact_score > 0.2 ? 'bg-warning/20 text-warning' : 'bg-surface text-text-muted')}>
+                             🏥 {p.away_injuries.status}
+                           </span>
+                        )}
+                        <span className={cn('text-xs px-2 py-0.5 rounded font-semibold', 
+                          p.away_news?.sentiment_label === 'Positivo' ? 'bg-green-500/20 text-green-400' : 
+                          p.away_news?.sentiment_label === 'Negativo' ? 'bg-red-500/20 text-red-400' : 'bg-surface-2 text-text-muted')}>
+                          {p.away_news?.sentiment_label || 'Neutral'}
+                        </span>
+                      </div>
+                    </div>
+                    {p.away_news?.headlines?.length > 0 ? (
+                      <ul className="text-xs text-text-muted list-disc list-inside space-y-1">
+                        {p.away_news.headlines.map((h: string, i: number) => <li key={i} className="truncate">{h}</li>)}
+                      </ul>
+                    ) : <p className="text-xs text-text-muted italic">Sin noticias recientes</p>}
                   </div>
                 </div>
               )}

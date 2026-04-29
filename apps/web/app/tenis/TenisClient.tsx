@@ -5,7 +5,7 @@ import { Dumbbell, Clock, BarChart2, Layers, Hash, Activity, Trophy, Loader2 } f
 import { cn } from '@/lib/utils'
 
 // ---- Types ------------------------------------------------------------------
-type AnalysisView = 'ganador' | 'sets' | 'juegos'
+type AnalysisView = 'ganador' | 'sets' | 'juegos' | 'noticias'
 
 interface TennisPrediction {
   p1_win_prob: number
@@ -25,18 +25,10 @@ interface TennisPrediction {
   p_under_22_5: number
   p_handicap_p1: number
   p_firstset_p1: number
-}
-
-interface MappedMatch {
-  id: string
-  tour: string
-  tournament: string
-  surface: string
-  round: string
-  date: string
-  player1: string
-  player2: string
-  pred: TennisPrediction
+  p1_news?: any
+  p2_news?: any
+  weather?: any
+  h2h_history?: any
 }
 
 // ---- Config -----------------------------------------------------------------
@@ -143,8 +135,11 @@ export default function TenisClient() {
                   exp_total_games:    pred.exp_total_games ?? 22,
                   p_over_22_5:        pred.p_over_22_5 ?? 0.50,
                   p_under_22_5:       pred.p_under_22_5 ?? 0.50,
-                  p_handicap_p1:      pred.p_handicap_p1 ?? 0.50,
                   p_firstset_p1:      pred.p_firstset_p1 ?? 0.50,
+                  p1_news:            pred.p1_news,
+                  p2_news:            pred.p2_news,
+                  weather:            pred.weather,
+                  h2h_history:        pred.h2h_history,
                 },
               }
             })
@@ -249,6 +244,7 @@ export default function TenisClient() {
           ['ganador', 'Ganador', BarChart2],
           ['sets',    'Sets',    Layers],
           ['juegos',  'Juegos',  Hash],
+          ['noticias','Noticias',Activity],
         ] as [AnalysisView, string, React.ElementType][]).map(([val, label, Icon]) => (
           <button
             key={val}
@@ -296,6 +292,12 @@ export default function TenisClient() {
                     <Clock className="w-3 h-3" /> {match.date} · {match.round}
                   </div>
                 </div>
+                {p.weather?.condition && (
+                  <div className="text-[10px] text-text-muted bg-surface-2 px-1.5 py-0.5 rounded flex items-center gap-1 h-fit">
+                    {p.weather.rain_mm > 0 ? '🌧️' : p.weather.wind_kmh > 20 ? '💨' : '☀️'}
+                    {p.weather.temp_c}°C
+                  </div>
+                )}
               </div>
 
               {/* Players with Elo */}
@@ -389,6 +391,44 @@ export default function TenisClient() {
                   <div className="bg-surface-2/60 rounded-lg px-3 py-2 flex items-center justify-between">
                     <span className="text-xs text-text-muted">1er set — {match.player1}</span>
                     <span className="text-sm font-bold text-text">{(p.p_firstset_p1 * 100).toFixed(0)}%</span>
+                  </div>
+                </div>
+              )}
+
+              {/* ── Noticias view ── */}
+              {activeView === 'noticias' && (
+                <div className="space-y-4">
+                  {/* P1 News */}
+                  <div className="bg-surface-2/40 rounded-lg p-3 space-y-2 border border-surface-2">
+                    <div className="flex justify-between items-center">
+                      <span className="font-bold text-xs text-text">{match.player1}</span>
+                      <span className={cn('text-xs px-2 py-0.5 rounded font-semibold', 
+                        p.p1_news?.sentiment_label === 'Positivo' ? 'bg-green-500/20 text-green-400' : 
+                        p.p1_news?.sentiment_label === 'Negativo' ? 'bg-red-500/20 text-red-400' : 'bg-surface-2 text-text-muted')}>
+                        {p.p1_news?.sentiment_label || 'Neutral'}
+                      </span>
+                    </div>
+                    {p.p1_news?.headlines?.length > 0 ? (
+                      <ul className="text-xs text-text-muted list-disc list-inside space-y-1">
+                        {p.p1_news.headlines.map((h: string, i: number) => <li key={i} className="truncate">{h}</li>)}
+                      </ul>
+                    ) : <p className="text-xs text-text-muted italic">Sin noticias recientes</p>}
+                  </div>
+                  {/* P2 News */}
+                  <div className="bg-surface-2/40 rounded-lg p-3 space-y-2 border border-surface-2">
+                    <div className="flex justify-between items-center">
+                      <span className="font-bold text-xs text-text">{match.player2}</span>
+                      <span className={cn('text-xs px-2 py-0.5 rounded font-semibold', 
+                        p.p2_news?.sentiment_label === 'Positivo' ? 'bg-green-500/20 text-green-400' : 
+                        p.p2_news?.sentiment_label === 'Negativo' ? 'bg-red-500/20 text-red-400' : 'bg-surface-2 text-text-muted')}>
+                        {p.p2_news?.sentiment_label || 'Neutral'}
+                      </span>
+                    </div>
+                    {p.p2_news?.headlines?.length > 0 ? (
+                      <ul className="text-xs text-text-muted list-disc list-inside space-y-1">
+                        {p.p2_news.headlines.map((h: string, i: number) => <li key={i} className="truncate">{h}</li>)}
+                      </ul>
+                    ) : <p className="text-xs text-text-muted italic">Sin noticias recientes</p>}
                   </div>
                 </div>
               )}

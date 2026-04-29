@@ -17,6 +17,8 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from scrapers.nba_scraper import run_nba_stats_scrape, NBAStatsScraper
+from scrapers.news_scraper import NewsScraper
+from scrapers.injury_scraper import InjuryScraper
 from models.nba_model import get_predictor
 from services.supabase_client import get_supabase
 
@@ -249,11 +251,25 @@ async def predict_match(match_id: str):
 
     home_stats = get_team_stats(home_team_id)
     away_stats = get_team_stats(away_team_id)
+    
+    # Fetch news sentiment and injuries
+    news_scraper = NewsScraper()
+    injury_scraper = InjuryScraper()
+    
+    home_news = await news_scraper.get_team_news_sentiment(match["home_team"]["name"])
+    away_news = await news_scraper.get_team_news_sentiment(match["away_team"]["name"])
+    
+    home_injuries = await injury_scraper.get_team_injuries(match["home_team"]["name"], "nba")
+    away_injuries = await injury_scraper.get_team_injuries(match["away_team"]["name"], "nba")
 
     predictor  = get_predictor()
     match_data = {
         "home_stats": home_stats,
         "away_stats": away_stats,
+        "home_news":  home_news,
+        "away_news":  away_news,
+        "home_injuries": home_injuries,
+        "away_injuries": away_injuries,
         "h2h":        {"h2h_home_win_pct": 0.55},
     }
     prediction = predictor.predict(match_data)
@@ -302,10 +318,23 @@ async def predict_all_matches(days_ahead: int = Query(14, ge=1, le=30)):
         try:
             home_stats = get_team_stats(match["home_team_id"])
             away_stats = get_team_stats(match["away_team_id"])
+            
+            news_scraper = NewsScraper()
+            injury_scraper = InjuryScraper()
+            
+            home_news = await news_scraper.get_team_news_sentiment(match["home_team"]["name"])
+            away_news = await news_scraper.get_team_news_sentiment(match["away_team"]["name"])
+            
+            home_injuries = await injury_scraper.get_team_injuries(match["home_team"]["name"], "nba")
+            away_injuries = await injury_scraper.get_team_injuries(match["away_team"]["name"], "nba")
 
             match_data = {
                 "home_stats": home_stats,
                 "away_stats": away_stats,
+                "home_news":  home_news,
+                "away_news":  away_news,
+                "home_injuries": home_injuries,
+                "away_injuries": away_injuries,
                 "h2h":        {"h2h_home_win_pct": 0.55},
             }
             prediction = predictor.predict(match_data)

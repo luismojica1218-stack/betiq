@@ -20,7 +20,7 @@ const LEAGUES = [
 ]
 
 // ---- Types ------------------------------------------------------------------
-type AnalysisView = 'resultado' | 'goles' | 'corners'
+type AnalysisView = 'resultado' | 'goles' | 'corners' | 'noticias'
 
 interface GoalsRange {
   p_0_1: number
@@ -43,6 +43,10 @@ interface FootballPrediction {
   goals_range: GoalsRange
   corners_estimate: number
   home_scores_first_pct: number
+  home_news?: any
+  away_news?: any
+  weather?: any
+  h2h_history?: any
 }
 
 interface MappedMatch {
@@ -137,6 +141,10 @@ export default function FutbolClient() {
                   goals_range:          pred.goals_range ?? { p_0_1: 0.25, p_2_3: 0.50, p_4_plus: 0.25 },
                   corners_estimate:     pred.corners_estimate ?? 9.5,
                   home_scores_first_pct: pred.home_scores_first_pct ?? 0.55,
+                  home_news:            pred.home_news,
+                  away_news:            pred.away_news,
+                  weather:              pred.weather,
+                  h2h_history:          pred.h2h_history,
                 },
               }
             })
@@ -232,6 +240,7 @@ export default function FutbolClient() {
           ['resultado', 'Resultado', BarChart2],
           ['goles',     'Goles',     Target],
           ['corners',   'Córners',   TrendingUp],
+          ['noticias',  'Noticias',  Target],
         ] as [AnalysisView, string, React.ElementType][]).map(([val, label, Icon]) => (
           <button
             key={val}
@@ -267,12 +276,22 @@ export default function FutbolClient() {
             <div key={match.id} className="card space-y-4">
               {/* Card header */}
               <div>
-                <div className="flex items-center gap-1.5 mb-2">
-                  <span>{lg?.flag}</span>
-                  <span className={cn('text-xs font-semibold', lg?.color)}>{lg?.name}</span>
-                  <span className="text-text-muted text-xs ml-auto flex items-center gap-1">
-                    <Clock className="w-3 h-3" />{match.date}
-                  </span>
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-1.5">
+                    <span>{lg?.flag}</span>
+                    <span className={cn('text-xs font-semibold', lg?.color)}>{lg?.name}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {p.weather?.condition && (
+                      <span className="text-[10px] text-text-muted bg-surface-2 px-1.5 py-0.5 rounded flex items-center gap-1">
+                        {p.weather.rain_mm > 0 ? '🌧️' : p.weather.wind_kmh > 20 ? '💨' : '☀️'}
+                        {p.weather.temp_c}°C
+                      </span>
+                    )}
+                    <span className="text-text-muted text-xs flex items-center gap-1">
+                      <Clock className="w-3 h-3" />{match.date}
+                    </span>
+                  </div>
                 </div>
                 <div className="flex items-center justify-between font-bold text-text">
                   <span className="text-sm">{match.homeTeam}</span>
@@ -376,6 +395,44 @@ export default function FutbolClient() {
                       </div>
                       <span className="text-xs font-bold text-text w-8 text-right">{p.xg_away.toFixed(2)}</span>
                     </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ── Noticias view ── */}
+              {activeView === 'noticias' && (
+                <div className="space-y-4">
+                  {/* Home News */}
+                  <div className="bg-surface-2/40 rounded-lg p-3 space-y-2 border border-surface-2">
+                    <div className="flex justify-between items-center">
+                      <span className="font-bold text-xs text-text">{match.homeTeam}</span>
+                      <span className={cn('text-xs px-2 py-0.5 rounded font-semibold', 
+                        p.home_news?.sentiment_label === 'Positivo' ? 'bg-green-500/20 text-green-400' : 
+                        p.home_news?.sentiment_label === 'Negativo' ? 'bg-red-500/20 text-red-400' : 'bg-surface-2 text-text-muted')}>
+                        {p.home_news?.sentiment_label || 'Neutral'}
+                      </span>
+                    </div>
+                    {p.home_news?.headlines?.length > 0 ? (
+                      <ul className="text-xs text-text-muted list-disc list-inside space-y-1">
+                        {p.home_news.headlines.map((h: string, i: number) => <li key={i} className="truncate">{h}</li>)}
+                      </ul>
+                    ) : <p className="text-xs text-text-muted italic">Sin noticias recientes</p>}
+                  </div>
+                  {/* Away News */}
+                  <div className="bg-surface-2/40 rounded-lg p-3 space-y-2 border border-surface-2">
+                    <div className="flex justify-between items-center">
+                      <span className="font-bold text-xs text-text">{match.awayTeam}</span>
+                      <span className={cn('text-xs px-2 py-0.5 rounded font-semibold', 
+                        p.away_news?.sentiment_label === 'Positivo' ? 'bg-green-500/20 text-green-400' : 
+                        p.away_news?.sentiment_label === 'Negativo' ? 'bg-red-500/20 text-red-400' : 'bg-surface-2 text-text-muted')}>
+                        {p.away_news?.sentiment_label || 'Neutral'}
+                      </span>
+                    </div>
+                    {p.away_news?.headlines?.length > 0 ? (
+                      <ul className="text-xs text-text-muted list-disc list-inside space-y-1">
+                        {p.away_news.headlines.map((h: string, i: number) => <li key={i} className="truncate">{h}</li>)}
+                      </ul>
+                    ) : <p className="text-xs text-text-muted italic">Sin noticias recientes</p>}
                   </div>
                 </div>
               )}

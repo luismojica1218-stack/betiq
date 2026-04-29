@@ -15,6 +15,8 @@ from fastapi.responses import StreamingResponse
 
 from scrapers.tennis_scraper import run_tennis_stats_scrape
 from models.tennis_model import get_tennis_predictor
+from scrapers.news_scraper import NewsScraper
+from scrapers.weather_scraper import WeatherScraper
 from services.supabase_client import get_supabase
 from constants import TENNIS_TOURNAMENTS
 
@@ -208,6 +210,14 @@ async def predict_tennis_match(match_id: str):
 
     p1_stats = get_player_stats(match["home_team_id"])
     p2_stats = get_player_stats(match["away_team_id"])
+    
+    news_scraper = NewsScraper()
+    weather_scraper = WeatherScraper()
+    p1_news = await news_scraper.get_team_news_sentiment(match.get("player1", {}).get("name", "P1"))
+    p2_news = await news_scraper.get_team_news_sentiment(match.get("player2", {}).get("name", "P2"))
+    
+    # Tennis "league" is ATP or WTA. The weather scraper has a fallback.
+    weather = await weather_scraper.get_weather(match.get("league", "ATP"))
 
     md = {
         "player1":      match.get("player1", {}).get("name", "P1"),
@@ -217,6 +227,9 @@ async def predict_tennis_match(match_id: str):
         "is_grand_slam": False,
         "p1_stats":     p1_stats,
         "p2_stats":     p2_stats,
+        "p1_news":      p1_news,
+        "p2_news":      p2_news,
+        "weather":      weather,
         "h2h":          {},
     }
 

@@ -26,20 +26,20 @@ XGB_PATH    = WEIGHTS_DIR / "football_xgb.pkl"
 LGBM_PATH   = WEIGHTS_DIR / "football_lgbm.pkl"
 SCALER_PATH = WEIGHTS_DIR / "football_scaler.pkl"
 
-# 21 features — implied odds removed
+# 25 features — implied odds removed, news and weather added
 FEATURE_NAMES = [
     # Home team
     "home_xg_per_game", "home_xga_per_game", "home_goals_per_game",
     "home_conceded_per_game", "home_poss", "home_win_pct",
-    "home_draw_pct", "home_form_xg", "home_form_xga",
+    "home_draw_pct", "home_form_xg", "home_form_xga", "home_news_sentiment",
     # Away team
     "away_xg_per_game", "away_xga_per_game", "away_goals_per_game",
     "away_conceded_per_game", "away_poss", "away_win_pct",
-    "away_draw_pct", "away_form_xg", "away_form_xga",
+    "away_draw_pct", "away_form_xg", "away_form_xga", "away_news_sentiment",
     # H2H & context
     "h2h_home_win_pct", "h2h_draw_pct",
-    # League strength factor
-    "league_strength",
+    # League & Environment
+    "league_strength", "weather_rain", "weather_wind",
 ]
 
 
@@ -184,6 +184,26 @@ class FootballPredictor:
             h.get("xga_per_game", h.get("conceded_per_game", league_avg)),
             league_avg,
         )
+        
+        # Adjust lambda based on news sentiment
+        h_news = match_data.get("home_news", {}).get("sentiment_score", 0.0)
+        a_news = match_data.get("away_news", {}).get("sentiment_score", 0.0)
+        lam_home *= (1.0 + (h_news * 0.1)) # Up to 10% boost/penalty
+        lam_away *= (1.0 + (a_news * 0.1))
+        
+        # Adjust lambda based on weather (rain / wind reduces expected goals)
+        w_rain = match_data.get("weather", {}).get("rain_mm", 0.0)
+        w_wind = match_data.get("weather", {}).get("wind_kmh", 10.0)
+        
+        weather_penalty = 1.0
+        if w_rain > 2.0:
+            weather_penalty *= 0.90 # Heavy rain = 10% fewer goals
+        if w_wind > 25.0:
+            weather_penalty *= 0.95 # High wind = 5% fewer goals
+            
+        lam_home *= weather_penalty
+        lam_away *= weather_penalty
+        
         # Home advantage adjustment
         lam_home *= 1.10
 
@@ -196,14 +216,14 @@ class FootballPredictor:
                 h.get("goals_per_game", 1.4),       h.get("conceded_per_game", 1.4),
                 h.get("poss", 50.0),                h.get("win_pct", 0.45),
                 h.get("draw_pct", 0.25),            h.get("form_xg", 1.4),
-                h.get("form_xga", 1.4),
+                h.get("form_xga", 1.4),             float(h_news),
                 a.get("xg_per_game", 1.4),         a.get("xga_per_game", 1.4),
                 a.get("goals_per_game", 1.4),       a.get("conceded_per_game", 1.4),
                 a.get("poss", 50.0),                a.get("win_pct", 0.40),
                 a.get("draw_pct", 0.25),            a.get("form_xg", 1.4),
-                a.get("form_xga", 1.4),
+                a.get("form_xga", 1.4),             float(a_news),
                 h2h.get("h2h_home_win_pct", 0.45), h2h.get("h2h_draw_pct", 0.25),
-                match_data.get("league_strength", 0.5),
+                match_data.get("league_strength", 0.5), float(w_rain), float(w_wind),
             ]])
             if self.scaler:
                 feats = self.scaler.transform(feats)
@@ -271,7 +291,12 @@ class FootballPredictor:
             "corners_estimate": corners_estimate,
             # First scorer probability
             "home_scores_first_pct": home_scores_first_pct,
-            "model_version": "v3.0-stats",
+            # News & Context details for UI display
+            "home_news":            match_data.get("home_news", {}),
+            "away_news":            match_data.get("away_news", {}),
+            "weather":              match_data.get("weather", {}),
+            "h2h_history":          match_data.get("h2h", {}),
+            "model_version": "v5.0-stats-news-weather",
         }
 
     async def bootstrap_training(self, log_queue: Optional[asyncio.Queue] = None) -> dict:
@@ -308,10 +333,19 @@ class FootballPredictor:
             h2h_h  = np.random.beta(4, 4)
             h2h_d  = np.random.beta(2, 6)
             lstr   = np.random.uniform(0.3, 0.9)
+            h_news = np.random.uniform(-1.0, 1.0)
+            a_news = np.random.uniform(-1.0, 1.0)
+            w_rain = np.random.exponential(1.0) # mm of rain
+            w_wind = np.random.normal(15.0, 5.0) # km/h wind
 
-            # Determine outcome based on xG advantage + home advantage (no implied odds)
-            lam_h = max(h_xg / 1.4 * a_xga / 1.4 * 1.4 * 1.10, 0.3)
-            lam_a = max(a_xg / 1.4 * h_xga / 1.4 * 1.4, 0.3)
+            # Determine outcome based on xG advantage + home advantage (no implied odds) + news sentiment
+            # Add weather impact to lambda
+            w_pen = 1.0
+            if w_rain > 2.0: w_pen *= 0.90
+            if w_wind > 25.0: w_pen *= 0.95
+            
+            lam_h = max(h_xg / 1.4 * a_xga / 1.4 * 1.4 * 1.10 * (1 + h_news * 0.1) * w_pen, 0.3)
+            lam_a = max(a_xg / 1.4 * h_xga / 1.4 * 1.4 * (1 + a_news * 0.1) * w_pen, 0.3)
             ph, pd, pa, _ = poisson_match_probs(lam_h, lam_a)
 
             rand = np.random.random()
@@ -322,11 +356,11 @@ class FootballPredictor:
             else:
                 label = 2   # away win
 
-            # 21 features — no implied odds
+            # 25 features — no implied odds
             X.append([
-                h_xg, h_xga, h_gol, h_con, h_pos, h_wpct, h_dpct, h_fxg, h_fxga,
-                a_xg, a_xga, a_gol, a_con, a_pos, a_wpct, a_dpct, a_fxg, a_fxga,
-                h2h_h, h2h_d, lstr,
+                h_xg, h_xga, h_gol, h_con, h_pos, h_wpct, h_dpct, h_fxg, h_fxga, h_news,
+                a_xg, a_xga, a_gol, a_con, a_pos, a_wpct, a_dpct, a_fxg, a_fxga, a_news,
+                h2h_h, h2h_d, lstr, w_rain, w_wind
             ])
             y.append(label)
 

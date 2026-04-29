@@ -28,16 +28,16 @@ SCALER_PATH = WEIGHTS_DIR / "nba_scaler.pkl"
 FEATURES_PATH = WEIGHTS_DIR / "nba_features.pkl"
 
 # ---- Feature names ----------------------------------------------------------
-# 23 features — odds-derived features intentionally excluded
+# 27 features — odds-derived features intentionally excluded, news and injuries added
 FEATURE_NAMES = [
     "home_pts_per_game", "home_opp_pts_per_game", "home_fg_pct",
     "home_three_p_pct", "home_reb_per_game", "home_ast_per_game",
     "home_last5_wins_pct", "home_home_wins_pct",
-    "home_days_rest", "home_is_back_to_back",
+    "home_days_rest", "home_is_back_to_back", "home_news_sentiment", "home_injuries",
     "away_pts_per_game", "away_opp_pts_per_game", "away_fg_pct",
     "away_three_p_pct", "away_reb_per_game", "away_ast_per_game",
     "away_last5_wins_pct", "away_away_wins_pct",
-    "away_days_rest", "away_is_back_to_back",
+    "away_days_rest", "away_is_back_to_back", "away_news_sentiment", "away_injuries",
     "h2h_home_win_pct",
     "net_rating_diff",   # home net_rating - away net_rating
     "form_diff",         # home last5 - away last5
@@ -134,6 +134,12 @@ class NBAPredictor:
         h_l5  = h.get("last5_wins_pct", 0.5)
         a_l5  = a.get("last5_wins_pct", 0.5)
 
+        h_news = match_data.get("home_news", {}).get("sentiment_score", 0.0)
+        a_news = match_data.get("away_news", {}).get("sentiment_score", 0.0)
+        
+        h_inj = match_data.get("home_injuries", {}).get("impact_score", 0.0)
+        a_inj = match_data.get("away_injuries", {}).get("impact_score", 0.0)
+
         feats = [
             h_pts,
             h_opp,
@@ -145,6 +151,8 @@ class NBAPredictor:
             h.get("home_wins_pct", 0.55),
             float(h.get("days_rest", 2)),
             float(h.get("is_back_to_back", 0)),
+            float(h_news),
+            float(h_inj),
             a_pts,
             a_opp,
             a.get("fg_pct", 0.46),
@@ -155,6 +163,8 @@ class NBAPredictor:
             a.get("away_wins_pct", 0.45),
             float(a.get("days_rest", 2)),
             float(a.get("is_back_to_back", 0)),
+            float(a_news),
+            float(a_inj),
             h2h.get("h2h_home_win_pct", 0.5),
             (h_pts - h_opp) - (a_pts - a_opp),  # net_rating_diff
             h_l5 - a_l5,                          # form_diff
@@ -246,7 +256,13 @@ class NBAPredictor:
             # Game tempo and margin
             "pace":                 pace,
             "blowout_probability":  blowout_probability,
-            "model_version":        "v2.0-stats",
+            # News & Context details for UI display
+            "home_news":            match_data.get("home_news", {}),
+            "away_news":            match_data.get("away_news", {}),
+            "home_injuries":        match_data.get("home_injuries", {}),
+            "away_injuries":        match_data.get("away_injuries", {}),
+            "h2h_history":          match_data.get("h2h", {}),
+            "model_version":        "v4.0-stats-news-inj",
         }
 
     # ---- Bootstrap Training -------------------------------------------------
@@ -285,24 +301,30 @@ class NBAPredictor:
             a_rest = np.random.choice([1, 2, 3, 4])
             h_b2b  = float(h_rest == 1)
             a_b2b  = float(a_rest == 1)
+            h_news = np.random.uniform(-1.0, 1.0)
+            a_news = np.random.uniform(-1.0, 1.0)
+            h_inj  = np.random.uniform(0.0, 1.0)
+            a_inj  = np.random.uniform(0.0, 1.0)
             h2h    = np.random.uniform(0.3, 0.7)
             net_h  = h_pts - h_opp
             net_a  = a_pts - a_opp
 
-            # Label based purely on team quality — no odds involved
+            # Label based purely on team quality and news sentiment — no odds involved
             strength = (
                 (net_h - net_a) * 0.4 +
                 (h_l5 - a_l5) * 20 +
                 (h_hw - 0.5) * 15 +
                 (h2h - 0.5) * 10 +
+                (h_news - a_news) * 3 + # news sentiment impact
+                (a_inj - h_inj) * 15 +  # injury impact (higher score = worse team)
                 3  # home court advantage
             )
             prob_true = 1 / (1 + np.exp(-strength / 15))
             label = int(np.random.random() < prob_true)
 
             feats = [
-                h_pts, h_opp, h_fg, h_3p, h_reb, h_ast, h_l5, h_hw, h_rest, h_b2b,
-                a_pts, a_opp, a_fg, a_3p, a_reb, a_ast, a_l5, a_aw, a_rest, a_b2b,
+                h_pts, h_opp, h_fg, h_3p, h_reb, h_ast, h_l5, h_hw, h_rest, h_b2b, h_news, h_inj,
+                a_pts, a_opp, a_fg, a_3p, a_reb, a_ast, a_l5, a_aw, a_rest, a_b2b, a_news, a_inj,
                 h2h, net_h - net_a, h_l5 - a_l5,
             ]
             X_list.append(feats)
