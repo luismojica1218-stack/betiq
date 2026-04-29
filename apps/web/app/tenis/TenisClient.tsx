@@ -31,6 +31,18 @@ interface TennisPrediction {
   h2h_history?: any
 }
 
+interface MappedMatch {
+  id: string
+  tour: string
+  tournament: string
+  surface: string
+  round: string
+  date: string
+  player1: string
+  player2: string
+  pred: TennisPrediction
+}
+
 // ---- Config -----------------------------------------------------------------
 const TOURS = [
   { key: 'all', label: 'Todos',    color: 'text-text' },
